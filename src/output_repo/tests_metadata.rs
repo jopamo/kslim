@@ -101,6 +101,34 @@ fn test_host_specific_path_detection_covers_local_url_and_windows_forms() {
     assert!(!is_host_specific_absolute_path(
         "\\\\\\\\n"
     ));
+    assert!(!is_host_specific_absolute_path(
+        "\\\\n\\t-I$(FULL_AMD_PATH)/include"
+    ));
+}
+
+#[test]
+fn test_host_specific_path_marker_ignores_make_variable_path_suffixes() {
+    let contents =
+        "logical_item = \"AMD_ACP_FILES := $(AMDACPPATH)/acp_hw.o\\n\"\n";
+
+    assert_eq!(
+        crate::security::find_host_specific_absolute_path_marker(contents),
+        None
+    );
+}
+
+#[test]
+fn test_host_specific_path_marker_ignores_serialized_line_continuation_include_flags() {
+    let contents = concat!(
+        "logical_item = \"ccflags-y := -I$(FULL_AMD_PATH)/include/asic_reg \\\\\\n",
+        "\\t-I$(FULL_AMD_PATH)/include \\\\\\n",
+        "\\t-I$(FULL_AMD_PATH)/amdgpu\\n\"\n",
+    );
+
+    assert_eq!(
+        crate::security::find_host_specific_absolute_path_marker(contents),
+        None
+    );
 }
 
 #[test]

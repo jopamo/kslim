@@ -97,7 +97,7 @@ fn is_host_path_token_boundary(ch: char) -> bool {
     ch.is_whitespace()
         || matches!(
             ch,
-            '"' | '\'' | '`' | ',' | ';' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | '|'
+            '"' | '\'' | '`' | ',' | ';' | '|'
         )
 }
 
@@ -116,9 +116,20 @@ pub(crate) fn is_host_specific_absolute_path(value: &str) -> bool {
     if value.is_empty() {
         return false;
     }
+    if starts_with_serialized_escape_prefix(value) {
+        return false;
+    }
     Path::new(value).is_absolute()
         || is_file_url_absolute_path_like(value)
         || is_windows_absolute_path_like(value)
+}
+
+fn starts_with_serialized_escape_prefix(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0] == b'\\'
+        && bytes[1] == b'\\'
+        && matches!(bytes[2], b'n' | b'r' | b't' | b'u' | b'"' | b'\'' | b'\\')
 }
 
 fn is_file_url_absolute_path_like(value: &str) -> bool {
