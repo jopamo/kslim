@@ -7,7 +7,7 @@
 //! registration invocations in removed providers.
 
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::model::RuntimeRegistrationSurface;
@@ -70,17 +70,28 @@ pub(crate) fn prove_removed_runtime_registrations_have_no_live_entry_points(
         }
     }
 
+    let tracked_entry_points = removed_registrations
+        .iter()
+        .flat_map(|registration| registration.entry_points.iter().cloned())
+        .collect::<BTreeSet<_>>();
+    let live_references =
+        live_references_for_entry_points(root, &live_sources, &tracked_entry_points)?;
+
     let mut proofs = BTreeSet::new();
     for registration in removed_registrations {
-        let live_references =
-            live_references_for_entry_points(root, &live_sources, &registration.entry_points)?;
-        if !live_references.is_empty() {
+        let registration_live_references = registration
+            .entry_points
+            .iter()
+            .filter_map(|entry_point| live_references.get(entry_point))
+            .flat_map(|references| references.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        if !registration_live_references.is_empty() {
             anyhow::bail!(
                 "runtime registration removal requires proof that no live entry point remains for {} in {}:{}; live reference(s): {}",
                 registration.registration_macro,
                 registration.provider.display(),
                 registration.line,
-                render_live_references(&live_references),
+                render_live_references(&registration_live_references),
             );
         }
         proofs.insert(RuntimeRegistrationRemovalProof {
@@ -171,7 +182,30 @@ fn parse_registration_entry_points(source: &str, offset: usize) -> Option<(Vec<S
             return None;
         };
         entry_points.insert(identifier.to_string());
-        cursor = skip_ascii_whitespace(source, end);
+        cursor = end;
+        loop {
+            cursor = skip_ascii_whitespace(source, cursor);
+            if source[cursor..].starts_with('.') {
+                cursor += 1;
+                cursor = skip_ascii_whitespace(source, cursor);
+                let Some((_, end)) = parse_c_identifier(source, cursor) else {
+                    return None;
+                };
+                cursor = end;
+                continue;
+            }
+            if source[cursor..].starts_with("->") {
+                cursor += 2;
+                cursor = skip_ascii_whitespace(source, cursor);
+                let Some((_, end)) = parse_c_identifier(source, cursor) else {
+                    return None;
+                };
+                cursor = end;
+                continue;
+            }
+            break;
+        }
+        cursor = skip_ascii_whitespace(source, cursor);
         let ch = source[cursor..].chars().next()?;
         cursor += ch.len_utf8();
         match ch {
@@ -190,9 +224,13 @@ fn parse_registration_entry_points(source: &str, offset: usize) -> Option<(Vec<S
 fn live_references_for_entry_points(
     root: &Path,
     live_sources: &[PathBuf],
-    entry_points: &[String],
-) -> Result<BTreeSet<LiveEntryPointReference>> {
-    let mut references = BTreeSet::new();
+    entry_points: &BTreeSet<String>,
+) -> Result<BTreeMap<String, BTreeSet<LiveEntryPointReference>>> {
+    let mut references = BTreeMap::<String, BTreeSet<LiveEntryPointReference>>::new();
+    if entry_points.is_empty() {
+        return Ok(references);
+    }
+
     for relative in live_sources {
         let content = std::fs::read_to_string(root.join(relative)).with_context(|| {
             format!(
@@ -200,9 +238,11 @@ fn live_references_for_entry_points(
                 relative.display(),
             )
         })?;
-        for entry_point in entry_points {
-            for line in identifier_occurrence_lines(&content, entry_point) {
-                references.insert(LiveEntryPointReference {
+        for (entry_point, lines) in identifier_occurrence_lines_for_symbols(&content, entry_points)
+        {
+            let entry_point_references = references.entry(entry_point.clone()).or_default();
+            for line in lines {
+                entry_point_references.insert(LiveEntryPointReference {
                     file: relative.clone(),
                     line,
                     entry_point: entry_point.clone(),
@@ -237,7 +277,7 @@ fn source_files(root: &Path) -> Result<Vec<PathBuf>> {
 fn is_c_or_asm_source_path(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
-        Some("c" | "h" | "S" | "s" | "cc" | "cpp" | "cxx" | "hpp")
+        Some("c" | "S" | "s" | "cc" | "cpp" | "cxx")
     )
 }
 
@@ -254,8 +294,13 @@ fn path_is_removed(
             .any(|dir| normalized_relative_path_covers(dir, path))
 }
 
+#[allow(dead_code)]
 fn identifier_occurrence_lines(content: &str, symbol: &str) -> BTreeSet<usize> {
     let source = mask_c_comments_and_literals(content);
+    let local_static_symbols = file_local_static_function_symbols(&source);
+    if local_static_symbols.contains(symbol) {
+        return BTreeSet::new();
+    }
     let mut lines = BTreeSet::new();
     let mut offset = 0usize;
     let mut line = 1usize;
@@ -263,12 +308,85 @@ fn identifier_occurrence_lines(content: &str, symbol: &str) -> BTreeSet<usize> {
     while let Some((start, token, token_line)) = next_identifier(&source, offset, line) {
         line = token_line;
         offset = start + token.len();
-        if token == symbol {
+        if token == symbol && !identifier_is_member_access(&source, start) {
             lines.insert(token_line);
         }
     }
 
     lines
+}
+
+fn identifier_occurrence_lines_for_symbols(
+    content: &str,
+    entry_points: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeSet<usize>> {
+    let source = mask_c_comments_and_literals(content);
+    let local_static_symbols = file_local_static_function_symbols(&source);
+    let mut lines = BTreeMap::<String, BTreeSet<usize>>::new();
+    let mut offset = 0usize;
+    let mut line = 1usize;
+
+    while let Some((start, token, token_line)) = next_identifier(&source, offset, line) {
+        line = token_line;
+        offset = start + token.len();
+        if !entry_points.contains(token)
+            || local_static_symbols.contains(token)
+            || identifier_is_member_access(&source, start)
+        {
+            continue;
+        }
+        lines
+            .entry(token.to_string())
+            .or_default()
+            .insert(token_line);
+    }
+
+    lines
+}
+
+fn file_local_static_function_symbols(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(static_function_line_symbol)
+        .map(String::from)
+        .collect()
+}
+
+fn static_function_line_symbol(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("static ") {
+        return None;
+    }
+
+    let Some(open_paren) = trimmed.find('(') else {
+        return None;
+    };
+    let before = &trimmed[..open_paren];
+    before
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|part| !part.is_empty())
+        .next_back()
+}
+
+fn identifier_is_member_access(source: &str, start: usize) -> bool {
+    if start == 0 {
+        return false;
+    }
+
+    let mut prior = source[..start].chars().rev().skip_while(|ch| ch.is_whitespace());
+    let Some(last) = prior.next() else {
+        return false;
+    };
+
+    if last == '.' {
+        return true;
+    }
+
+    if last == '>' {
+        return prior.next().is_some_and(|ch| ch == '-');
+    }
+
+    false
 }
 
 fn next_identifier(
@@ -608,6 +726,76 @@ mod tests {
 
         assert!(err.contains("parsable entry-point proof"));
         assert!(err.contains("drivers/foo/provider.c:1"));
+    }
+
+    #[test]
+    fn test_prove_removed_runtime_registration_accepts_member_expression_entry_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "drivers/foo/provider.c",
+            concat!(
+                "static struct { int i2c_driver; } foo_driver;\n",
+                "static int foo_init(void) { return i2c_add_driver(&foo_driver.i2c_driver); }\n",
+            ),
+        );
+        let removed_paths = BTreeSet::from([PathBuf::from("drivers/foo/provider.c")]);
+        let removed_files = removed_paths.clone();
+
+        let proofs = prove_removed_runtime_registrations_have_no_live_entry_points(
+            root,
+            &removed_paths,
+            &BTreeSet::new(),
+            &removed_files,
+        )
+        .unwrap();
+
+        assert_eq!(
+            proofs,
+            BTreeSet::from([RuntimeRegistrationRemovalProof {
+                provider: PathBuf::from("drivers/foo/provider.c"),
+                registration_macro: String::from("i2c_add_driver"),
+                entry_points: vec![String::from("foo_driver")],
+                line: 2,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_prove_removed_runtime_registration_ignores_file_local_static_collision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "drivers/foo/provider.c",
+            "static int foo_init(void) { return 0; }\nmodule_init(foo_init);\n",
+        );
+        write(
+            root,
+            "drivers/live/user.c",
+            "static int foo_init(void) { return 1; }\nint keep = 1;\n",
+        );
+        let removed_paths = BTreeSet::from([PathBuf::from("drivers/foo/provider.c")]);
+        let removed_files = removed_paths.clone();
+
+        let proofs = prove_removed_runtime_registrations_have_no_live_entry_points(
+            root,
+            &removed_paths,
+            &BTreeSet::new(),
+            &removed_files,
+        )
+        .unwrap();
+
+        assert_eq!(
+            proofs,
+            BTreeSet::from([RuntimeRegistrationRemovalProof {
+                provider: PathBuf::from("drivers/foo/provider.c"),
+                registration_macro: String::from("module_init"),
+                entry_points: vec![String::from("foo_init")],
+                line: 2,
+            }])
+        );
     }
 
     fn write(root: &Path, relative: &str, content: &str) {

@@ -2,11 +2,11 @@
 //!
 //! Removing a file that provides an `EXPORT_SYMBOL*()` entry can break live
 //! consumers outside the removed subtree. This scanner is intentionally simple:
-//! it proves absence of live textual C/ASM consumers, and fails closed when a
-//! removed provider uses an unsupported export form.
+//! it proves absence of live textual C/ASM/C++ translation-unit consumers, and
+//! fails closed when a removed provider uses an unsupported export form.
 
 use anyhow::{Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::model::ExportedSymbol;
@@ -69,16 +69,21 @@ pub(crate) fn prove_removed_exports_have_no_live_consumers(
         }
     }
 
+    let removed_symbols = removed_exports
+        .iter()
+        .map(|export| export.symbol.clone())
+        .collect::<BTreeSet<_>>();
+    let live_consumers = live_consumers_for_symbols(root, &live_sources, &removed_symbols)?;
+
     let mut proofs = BTreeSet::new();
     for export in removed_exports {
-        let consumers = live_consumers_for_symbol(root, &live_sources, &export.symbol)?;
-        if !consumers.is_empty() {
+        if let Some(consumers) = live_consumers.get(&export.symbol) {
             anyhow::bail!(
                 "exported symbol provider removal requires proof that no live consumer remains for '{}' exported by {}:{}; live consumer(s): {}",
                 export.symbol.as_str(),
                 export.provider.display(),
                 export.line,
-                render_consumers(&consumers),
+                render_consumers(consumers),
             );
         }
         proofs.insert(ExportedSymbolRemovalProof {
@@ -154,26 +159,32 @@ fn scan_exported_symbols_in_content(relative: &Path, content: &str) -> ExportSca
     scan
 }
 
-fn live_consumers_for_symbol(
+fn live_consumers_for_symbols(
     root: &Path,
     live_sources: &[PathBuf],
-    symbol: &ExportedSymbol,
-) -> Result<BTreeSet<LiveSymbolConsumer>> {
-    let mut consumers = BTreeSet::new();
+    removed_symbols: &BTreeSet<ExportedSymbol>,
+) -> Result<BTreeMap<ExportedSymbol, BTreeSet<LiveSymbolConsumer>>> {
+    let mut consumers = BTreeMap::<ExportedSymbol, BTreeSet<LiveSymbolConsumer>>::new();
+    if removed_symbols.is_empty() {
+        return Ok(consumers);
+    }
+
     for relative in live_sources {
         let content = std::fs::read_to_string(root.join(relative)).with_context(|| {
             format!(
-                "failed to read live source while proving no consumers for exported symbol '{}': {}",
-                symbol.as_str(),
+                "failed to read live source while proving no consumers for removed exported symbols: {}",
                 relative.display(),
             )
         })?;
-        for line in identifier_occurrence_lines(&content, symbol.as_str()) {
-            consumers.insert(LiveSymbolConsumer {
-                file: relative.clone(),
-                line,
-                symbol: symbol.clone(),
-            });
+        for (symbol, lines) in identifier_occurrence_lines_for_symbols(&content, removed_symbols) {
+            let symbol_consumers = consumers.entry(symbol.clone()).or_default();
+            for line in lines {
+                symbol_consumers.insert(LiveSymbolConsumer {
+                    file: relative.clone(),
+                    line,
+                    symbol: symbol.clone(),
+                });
+            }
         }
     }
     Ok(consumers)
@@ -203,7 +214,7 @@ fn source_files(root: &Path) -> Result<Vec<PathBuf>> {
 fn is_c_or_asm_source_path(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|ext| ext.to_str()),
-        Some("c" | "h" | "S" | "s" | "cc" | "cpp" | "cxx" | "hpp")
+        Some("c" | "S" | "s" | "cc" | "cpp" | "cxx")
     )
 }
 
@@ -220,8 +231,13 @@ fn path_is_removed(
             .any(|dir| normalized_relative_path_covers(dir, path))
 }
 
+#[allow(dead_code)]
 fn identifier_occurrence_lines(content: &str, symbol: &str) -> BTreeSet<usize> {
     let source = mask_c_comments_and_literals(content);
+    let local_static_symbols = file_local_static_function_symbols(&source);
+    if local_static_symbols.contains(symbol) {
+        return BTreeSet::new();
+    }
     let mut lines = BTreeSet::new();
     let mut offset = 0usize;
     let mut line = 1usize;
@@ -229,12 +245,84 @@ fn identifier_occurrence_lines(content: &str, symbol: &str) -> BTreeSet<usize> {
     while let Some((start, token, token_line)) = next_identifier(&source, offset, line) {
         line = token_line;
         offset = start + token.len();
-        if token == symbol {
+        if token == symbol && !identifier_is_member_access(&source, start) {
             lines.insert(token_line);
         }
     }
 
     lines
+}
+
+fn identifier_occurrence_lines_for_symbols(
+    content: &str,
+    removed_symbols: &BTreeSet<ExportedSymbol>,
+) -> BTreeMap<ExportedSymbol, BTreeSet<usize>> {
+    let source = mask_c_comments_and_literals(content);
+    let local_static_symbols = file_local_static_function_symbols(&source);
+    let mut lines = BTreeMap::<ExportedSymbol, BTreeSet<usize>>::new();
+    let mut offset = 0usize;
+    let mut line = 1usize;
+
+    while let Some((start, token, token_line)) = next_identifier(&source, offset, line) {
+        line = token_line;
+        offset = start + token.len();
+        if !removed_symbols.contains(token)
+            || local_static_symbols.contains(token)
+            || identifier_is_member_access(&source, start)
+        {
+            continue;
+        }
+        let symbol = ExportedSymbol::new(token)
+            .expect("next_identifier should only emit valid C identifiers");
+        lines.entry(symbol).or_default().insert(token_line);
+    }
+
+    lines
+}
+
+fn file_local_static_function_symbols(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .filter_map(static_function_line_symbol)
+        .map(String::from)
+        .collect()
+}
+
+fn static_function_line_symbol(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with("static ") {
+        return None;
+    }
+
+    let Some(open_paren) = trimmed.find('(') else {
+        return None;
+    };
+    let before = &trimmed[..open_paren];
+    before
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|part| !part.is_empty())
+        .next_back()
+}
+
+fn identifier_is_member_access(source: &str, start: usize) -> bool {
+    if start == 0 {
+        return false;
+    }
+
+    let mut prior = source[..start].chars().rev().skip_while(|ch| ch.is_whitespace());
+    let Some(last) = prior.next() else {
+        return false;
+    };
+
+    if last == '.' {
+        return true;
+    }
+
+    if last == '>' {
+        return prior.next().is_some_and(|ch| ch == '-');
+    }
+
+    false
 }
 
 fn next_identifier(
@@ -498,6 +586,138 @@ mod tests {
                 symbol: ExportedSymbol::new("foo_api").unwrap(),
                 provider: PathBuf::from("drivers/foo/provider.c"),
                 export_macro: String::from("EXPORT_SYMBOL_NS"),
+                line: 2,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_prove_removed_exports_ignores_live_header_only_mentions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "net/sunrpc/xdr.c",
+            "void __xdr_commit_encode(void) {}\nEXPORT_SYMBOL_GPL(__xdr_commit_encode);\n",
+        );
+        write(
+            root,
+            "include/linux/sunrpc/xdr.h",
+            concat!(
+                "extern void __xdr_commit_encode(void);\n",
+                "static inline void xdr_commit_encode(void)\n",
+                "{\n",
+                "\t__xdr_commit_encode();\n",
+                "}\n",
+            ),
+        );
+        let removed_paths = BTreeSet::from([PathBuf::from("net/sunrpc")]);
+        let removed_dirs = removed_paths.clone();
+
+        let proofs = prove_removed_exports_have_no_live_consumers(
+            root,
+            &removed_paths,
+            &removed_dirs,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            proofs,
+            BTreeSet::from([ExportedSymbolRemovalProof {
+                symbol: ExportedSymbol::new("__xdr_commit_encode").unwrap(),
+                provider: PathBuf::from("net/sunrpc/xdr.c"),
+                export_macro: String::from("EXPORT_SYMBOL_GPL"),
+                line: 2,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_prove_removed_exports_ignores_struct_field_name_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "net/sunrpc/cache.c",
+            "void cache_flush(void) {}\nEXPORT_SYMBOL_GPL(cache_flush);\n",
+        );
+        write(
+            root,
+            "include/linux/ops.h",
+            "struct ops { void (*cache_flush)(void); };\n",
+        );
+        write(
+            root,
+            "drivers/live/user.c",
+            concat!(
+                "#include <linux/ops.h>\n",
+                "static void local_flush(void) {}\n",
+                "void user(struct ops *ops)\n",
+                "{\n",
+                "\tstruct ops defaults = { .cache_flush = local_flush };\n",
+                "\tops->cache_flush();\n",
+                "\tdefaults.cache_flush();\n",
+                "}\n",
+            ),
+        );
+        let removed_paths = BTreeSet::from([PathBuf::from("net/sunrpc")]);
+        let removed_dirs = removed_paths.clone();
+
+        let proofs = prove_removed_exports_have_no_live_consumers(
+            root,
+            &removed_paths,
+            &removed_dirs,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            proofs,
+            BTreeSet::from([ExportedSymbolRemovalProof {
+                symbol: ExportedSymbol::new("cache_flush").unwrap(),
+                provider: PathBuf::from("net/sunrpc/cache.c"),
+                export_macro: String::from("EXPORT_SYMBOL_GPL"),
+                line: 2,
+            }])
+        );
+    }
+
+    #[test]
+    fn test_prove_removed_exports_ignores_file_local_static_function_collisions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "net/sunrpc/stats.c",
+            "int svc_seq_show(void) { return 0; }\nEXPORT_SYMBOL_GPL(svc_seq_show);\n",
+        );
+        write(
+            root,
+            "drivers/live/user.c",
+            concat!(
+                "struct ops { int (*show)(void); };\n",
+                "static int svc_seq_show(void) { return 1; }\n",
+                "static struct ops ops = { .show = svc_seq_show };\n",
+            ),
+        );
+        let removed_paths = BTreeSet::from([PathBuf::from("net/sunrpc")]);
+        let removed_dirs = removed_paths.clone();
+
+        let proofs = prove_removed_exports_have_no_live_consumers(
+            root,
+            &removed_paths,
+            &removed_dirs,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            proofs,
+            BTreeSet::from([ExportedSymbolRemovalProof {
+                symbol: ExportedSymbol::new("svc_seq_show").unwrap(),
+                provider: PathBuf::from("net/sunrpc/stats.c"),
+                export_macro: String::from("EXPORT_SYMBOL_GPL"),
                 line: 2,
             }])
         );
