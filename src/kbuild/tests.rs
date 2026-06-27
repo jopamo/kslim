@@ -125,6 +125,15 @@ fn test_parse_kbuild_assignment_forms() {
             kind: KbuildAssignmentKind::CcFlags,
         })
     );
+    assert_eq!(
+        parse_kbuild_assignment("subdir-ccflags-y += -Iinclude/subdir/"),
+        Some(KbuildAssignment {
+            lhs: "subdir-ccflags-y",
+            op: "+=",
+            rhs: "-Iinclude/subdir/",
+            kind: KbuildAssignmentKind::CcFlags,
+        })
+    );
 }
 
 #[test]
@@ -239,6 +248,7 @@ fn test_build_kbuild_index_collects_providers_refs_dirs_gates_and_include_flags(
             "foo-$(CONFIG_BAR) += c.o\n",
             "subdir-y += child/\n",
             "ccflags-y += -Iinclude/linux -Iarch/x86/include\n",
+            "subdir-ccflags-y += -Iinclude/subdir/\n",
         ),
     )
     .unwrap();
@@ -304,6 +314,9 @@ fn test_build_kbuild_index_collects_providers_refs_dirs_gates_and_include_flags(
     }));
     assert!(index.include_path_flags.iter().any(|flag| {
         flag.flag == "-Iarch/x86/include" && flag.include_path == "arch/x86/include"
+    }));
+    assert!(index.include_path_flags.iter().any(|flag| {
+        flag.flag == "-Iinclude/subdir/" && flag.include_path == "include/subdir/"
     }));
 }
 

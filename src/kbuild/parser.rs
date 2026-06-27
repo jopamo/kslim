@@ -146,7 +146,7 @@ pub(in crate::kbuild) fn parse_kbuild_assignment_kind(lhs: &str) -> Option<Kbuil
     if lhs == "subdir-y" {
         return Some(KbuildAssignmentKind::SubdirList);
     }
-    if lhs == "ccflags-y" {
+    if is_flag_assignment(lhs) {
         return Some(KbuildAssignmentKind::CcFlags);
     }
     if lhs == "obj-y" {
@@ -200,6 +200,19 @@ pub(in crate::kbuild) fn parse_kbuild_assignment_kind(lhs: &str) -> Option<Kbuil
     None
 }
 
+fn is_flag_assignment(lhs: &str) -> bool {
+    matches!(
+        lhs,
+        "ccflags-y"
+            | "asflags-y"
+            | "cppflags-y"
+            | "ldflags-y"
+            | "subdir-ccflags-y"
+            | "subdir-asflags-y"
+            | "cflags-y"
+            | "aflags-y"
+    )
+}
 
 fn is_object_list_family(base: &str) -> bool {
     matches!(base, "obj" | "lib" | "always" | "extra" | "head" | "init")
