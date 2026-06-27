@@ -1777,13 +1777,14 @@ fn parse_quoted_string_literal<'a>(
     value_name: &str,
     line_number: usize,
 ) -> Result<Option<(String, &'a str)>> {
-    if !input.starts_with('"') {
+    let Some(quote) = input.chars().next().filter(|ch| matches!(ch, '"' | '\'')) else {
         return Ok(None);
-    }
+    };
 
     let mut prompt = String::new();
     let mut escape = false;
-    for (offset, ch) in input[1..].char_indices() {
+    let quote_len = quote.len_utf8();
+    for (offset, ch) in input[quote_len..].char_indices() {
         if escape {
             prompt.push(ch);
             escape = false;
@@ -1792,8 +1793,8 @@ fn parse_quoted_string_literal<'a>(
 
         match ch {
             '\\' => escape = true,
-            '"' => {
-                let trailing_start = 1 + offset + ch.len_utf8();
+            ch if ch == quote => {
+                let trailing_start = quote_len + offset + ch.len_utf8();
                 return Ok(Some((prompt, &input[trailing_start..])));
             }
             _ => prompt.push(ch),

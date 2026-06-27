@@ -187,13 +187,17 @@ fn parse_kconfig_document_parses_comment_entries() {
         "\tbool \"After\"\n",
         "comment\t\"Debug \\\"notes\\\"\"\n",
         "\tdepends on DEBUG\n",
+        "comment 'Single quoted note'\n",
     ))
     .unwrap();
 
     let comments = document.comments().collect::<Vec<_>>();
-    assert_eq!(comments.len(), 2);
-    assert_eq!(document.nodes().len(), 3);
-    assert_eq!(comment_prompts(&document), vec!["Driver note", "Debug \"notes\""]);
+    assert_eq!(comments.len(), 3);
+    assert_eq!(document.nodes().len(), 4);
+    assert_eq!(
+        comment_prompts(&document),
+        vec!["Driver note", "Debug \"notes\"", "Single quoted note"]
+    );
     assert_eq!(config_symbols(&document), vec!["AFTER"]);
     assert_eq!(comments[0].line(), 1);
     assert_eq!(comments[0].end_line(), 2);
@@ -215,6 +219,9 @@ fn parse_kconfig_document_parses_comment_entries() {
     );
     assert_eq!(comments[1].line(), 5);
     assert_eq!(comments[1].end_line(), 6);
+    assert_eq!(comments[2].directive().text(), "comment 'Single quoted note'");
+    assert_eq!(comments[2].line(), 7);
+    assert_eq!(comments[2].end_line(), 7);
 }
 #[test]
 fn parse_kconfig_document_parses_endmenu_markers() {

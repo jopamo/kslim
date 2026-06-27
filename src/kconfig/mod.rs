@@ -707,6 +707,13 @@ fn walk_named(root: &Path, names: &[&str]) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
     {
+        let relative = relative_to_root_path(root, entry.path());
+        if relative
+            .components()
+            .any(|component| component.as_os_str() == "templates")
+        {
+            continue;
+        }
         if entry
             .file_name()
             .to_str()
