@@ -70,11 +70,20 @@ enum CppDirective {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CppCondition {
-    Symbol(String),
+    Symbol(CppSymbol),
+    Literal(bool),
     Not(Box<CppCondition>),
     And(Box<CppCondition>, Box<CppCondition>),
     Or(Box<CppCondition>, Box<CppCondition>),
     Unsupported(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CppSymbol {
+    Plain(String),
+    Defined(String),
+    IsEnabled(String),
+    IsReachable(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,16 +106,38 @@ impl CppCondition {
     fn collect_removed_symbols(&self, removed: &HashSet<&str>, symbols: &mut BTreeSet<String>) {
         match self {
             Self::Symbol(symbol) => {
-                if removed.contains(symbol.as_str()) {
-                    symbols.insert(symbol.clone());
+                let normalized = symbol.normalized_name();
+                if removed.contains(normalized) {
+                    symbols.insert(normalized.to_string());
                 }
             }
+            Self::Literal(_) => {}
             Self::Not(inner) => inner.collect_removed_symbols(removed, symbols),
             Self::And(lhs, rhs) | Self::Or(lhs, rhs) => {
                 lhs.collect_removed_symbols(removed, symbols);
                 rhs.collect_removed_symbols(removed, symbols);
             }
             Self::Unsupported(_) => {}
+        }
+    }
+}
+
+impl CppSymbol {
+    fn normalized_name(&self) -> &str {
+        match self {
+            Self::Plain(symbol)
+            | Self::Defined(symbol)
+            | Self::IsEnabled(symbol)
+            | Self::IsReachable(symbol) => normalize_cpp_symbol(symbol),
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::Plain(symbol) => symbol.clone(),
+            Self::Defined(symbol) => format!("defined({symbol})"),
+            Self::IsEnabled(symbol) => format!("IS_ENABLED({symbol})"),
+            Self::IsReachable(symbol) => format!("IS_REACHABLE({symbol})"),
         }
     }
 }
@@ -132,7 +163,9 @@ impl<'a> ManifestConfigTruth<'a> {
 
     fn condition_truth(&self, condition: &CppCondition) -> TruthValue {
         match condition {
-            CppCondition::Symbol(symbol) => self.symbol_truth(symbol),
+            CppCondition::Symbol(symbol) => self.symbol_truth(symbol.normalized_name()),
+            CppCondition::Literal(true) => TruthValue::True,
+            CppCondition::Literal(false) => TruthValue::False,
             CppCondition::Not(inner) => match self.condition_truth(inner) {
                 TruthValue::True => TruthValue::False,
                 TruthValue::False => TruthValue::True,
@@ -157,6 +190,52 @@ impl<'a> ManifestConfigTruth<'a> {
                 }
             }
             CppCondition::Unsupported(_) => TruthValue::Unknown,
+        }
+    }
+
+    fn simplify_condition(&self, condition: &CppCondition) -> CppCondition {
+        match condition {
+            CppCondition::Symbol(symbol) => {
+                if self.removed.contains(symbol.normalized_name()) {
+                    CppCondition::Literal(false)
+                } else {
+                    CppCondition::Symbol(symbol.clone())
+                }
+            }
+            CppCondition::Literal(value) => CppCondition::Literal(*value),
+            CppCondition::Not(inner) => match self.simplify_condition(inner) {
+                CppCondition::Literal(value) => CppCondition::Literal(!value),
+                simplified => CppCondition::Not(Box::new(simplified)),
+            },
+            CppCondition::And(lhs, rhs) => {
+                let lhs = self.simplify_condition(lhs);
+                let rhs = self.simplify_condition(rhs);
+                match (&lhs, &rhs) {
+                    (CppCondition::Literal(false), _) | (_, CppCondition::Literal(false)) => {
+                        CppCondition::Literal(false)
+                    }
+                    (CppCondition::Literal(true), _) => rhs,
+                    (_, CppCondition::Literal(true)) => lhs,
+                    _ if lhs == rhs => lhs,
+                    _ => CppCondition::And(Box::new(lhs), Box::new(rhs)),
+                }
+            }
+            CppCondition::Or(lhs, rhs) => {
+                let lhs = self.simplify_condition(lhs);
+                let rhs = self.simplify_condition(rhs);
+                match (&lhs, &rhs) {
+                    (CppCondition::Literal(true), _) | (_, CppCondition::Literal(true)) => {
+                        CppCondition::Literal(true)
+                    }
+                    (CppCondition::Literal(false), _) => rhs,
+                    (_, CppCondition::Literal(false)) => lhs,
+                    _ if lhs == rhs => lhs,
+                    _ => CppCondition::Or(Box::new(lhs), Box::new(rhs)),
+                }
+            }
+            CppCondition::Unsupported(expression) => {
+                CppCondition::Unsupported(expression.clone())
+            }
         }
     }
 
@@ -196,6 +275,52 @@ fn cpp_token_mentions_removed_symbol(token: &str, removed: &HashSet<&str>) -> bo
         || token
             .strip_prefix("CONFIG_")
             .is_some_and(|symbol| removed.contains(symbol))
+}
+
+fn render_cpp_condition(condition: &CppCondition) -> String {
+    render_cpp_condition_with_precedence(condition, 0)
+}
+
+fn render_cpp_if_line(condition: &CppCondition) -> String {
+    format!("#if {}", render_cpp_condition(condition))
+}
+
+fn render_cpp_condition_with_precedence(condition: &CppCondition, parent_precedence: u8) -> String {
+    let precedence = cpp_condition_precedence(condition);
+    let rendered = match condition {
+        CppCondition::Symbol(symbol) => symbol.render(),
+        CppCondition::Literal(true) => String::from("1"),
+        CppCondition::Literal(false) => String::from("0"),
+        CppCondition::Not(inner) => {
+            format!("!{}", render_cpp_condition_with_precedence(inner, precedence))
+        }
+        CppCondition::And(lhs, rhs) => format!(
+            "{} && {}",
+            render_cpp_condition_with_precedence(lhs, precedence),
+            render_cpp_condition_with_precedence(rhs, precedence)
+        ),
+        CppCondition::Or(lhs, rhs) => format!(
+            "{} || {}",
+            render_cpp_condition_with_precedence(lhs, precedence),
+            render_cpp_condition_with_precedence(rhs, precedence)
+        ),
+        CppCondition::Unsupported(expression) => expression.clone(),
+    };
+
+    if precedence < parent_precedence {
+        format!("({rendered})")
+    } else {
+        rendered
+    }
+}
+
+fn cpp_condition_precedence(condition: &CppCondition) -> u8 {
+    match condition {
+        CppCondition::Or(_, _) => 1,
+        CppCondition::And(_, _) => 2,
+        CppCondition::Not(_) => 3,
+        CppCondition::Symbol(_) | CppCondition::Literal(_) | CppCondition::Unsupported(_) => 4,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,7 +373,11 @@ pub(crate) fn fold_removed_config_branches_report(
         }
     }
 
-    report.counts.branches_folded = report.edits.len();
+    report.counts.branches_folded = report
+        .edits
+        .iter()
+        .filter(|edit| edit.line_range.is_some_and(|range| !range.is_single_line()))
+        .count();
     report.counts.files_touched = report.rewrites.len();
     report.counts.skipped_nested_edge_cases = report.skipped_nested_edge_cases.len();
     ensure_edit_records_for_mutation(
@@ -393,8 +522,46 @@ fn fold_lines_with_offset(
             continue;
         }
         let truth = manifest_truth.condition_truth(&condition);
+        let simplified_condition = manifest_truth.simplify_condition(&condition);
         if truth == TruthValue::Unknown {
-            copy_lines(&mut out, chain_lines);
+            let mut line_rewritten = false;
+            if simplified_condition != condition {
+                let Some(symbol) = condition.first_removed_symbol(&manifest_truth.removed) else {
+                    copy_lines(&mut out, chain_lines);
+                    unsupported.extend(scan_unsupported_expressions(
+                        root,
+                        path,
+                        chain_lines,
+                        chain_contexts,
+                        manifest_truth,
+                        line_offset + idx,
+                    ));
+                    idx = chain.endif_idx + 1;
+                    continue;
+                };
+
+                let rewritten_line = render_cpp_if_line(&simplified_condition);
+                out.push(rewritten_line.clone());
+                copy_lines(&mut out, &chain_lines[1..]);
+                edits.push(EditRecord::new(
+                    relative_to_root_path(root, path),
+                    Some(LineRange {
+                        start: line_offset + idx + 1,
+                        end: line_offset + idx + 1,
+                    }),
+                    format!("{line}\n"),
+                    format!("{rewritten_line}\n"),
+                    EditReason::ManifestConfig {
+                        symbol: symbol.clone(),
+                    },
+                    EditProofSource::removal_manifest_config(symbol),
+                    "cpp.fold_removed_config_branches",
+                ));
+                modified = true;
+                line_rewritten = true;
+            } else {
+                copy_lines(&mut out, chain_lines);
+            }
             if has_nested_directives(chain_lines, chain_contexts) {
                 skipped_nested.push(SkippedCppNestedEdgeCase {
                     file: relative_to_root_path(root, path),
@@ -404,15 +571,17 @@ fn fold_lines_with_offset(
                     ),
                 });
             }
-            if let Some(site) = unresolved_removed_condition_site(
-                root,
-                path,
-                line,
-                &condition,
-                manifest_truth,
-                line_offset + idx + 1,
-            ) {
-                unsupported.push(site);
+            if !line_rewritten {
+                if let Some(site) = unresolved_removed_condition_site(
+                    root,
+                    path,
+                    line,
+                    &condition,
+                    manifest_truth,
+                    line_offset + idx + 1,
+                ) {
+                    unsupported.push(site);
+                }
             }
             unsupported.extend(scan_unsupported_expressions(
                 root,
@@ -439,7 +608,28 @@ fn fold_lines_with_offset(
             continue;
         };
         if !chain.elif_indices.is_empty() {
-            copy_lines(&mut out, chain_lines);
+            if simplified_condition != condition {
+                let rewritten_line = render_cpp_if_line(&simplified_condition);
+                out.push(rewritten_line.clone());
+                copy_lines(&mut out, &chain_lines[1..]);
+                edits.push(EditRecord::new(
+                    relative_to_root_path(root, path),
+                    Some(LineRange {
+                        start: line_offset + idx + 1,
+                        end: line_offset + idx + 1,
+                    }),
+                    format!("{line}\n"),
+                    format!("{rewritten_line}\n"),
+                    EditReason::ManifestConfig {
+                        symbol: symbol.clone(),
+                    },
+                    EditProofSource::removal_manifest_config(symbol.clone()),
+                    "cpp.fold_removed_config_branches",
+                ));
+                modified = true;
+            } else {
+                copy_lines(&mut out, chain_lines);
+            }
             unsupported.extend(scan_unsupported_expressions(
                 root,
                 path,
@@ -685,12 +875,12 @@ fn parse_cpp_directive(line: &str) -> Option<CppDirective> {
     match directive {
         "ifdef" => Some(CppDirective::If(
             parse_cpp_symbol(body)
-                .map(|symbol| CppCondition::Symbol(symbol.to_string()))
+                .map(CppCondition::Symbol)
                 .unwrap_or_else(|| CppCondition::Unsupported(body.to_string())),
         )),
         "ifndef" => Some(CppDirective::If(
             parse_cpp_symbol(body)
-                .map(|symbol| CppCondition::Not(Box::new(CppCondition::Symbol(symbol.to_string()))))
+                .map(|symbol| CppCondition::Not(Box::new(CppCondition::Symbol(symbol))))
                 .unwrap_or_else(|| CppCondition::Unsupported(body.to_string())),
         )),
         "if" => Some(CppDirective::If(
@@ -850,15 +1040,20 @@ fn parse_cpp_primary_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCon
                 _ => None,
             }
         }
-        CppToken::Ident(ident) if ident == "defined" => parse_defined_cpp_expr(tokens, idx),
-        CppToken::Ident(ident) if ident == "IS_ENABLED" || ident == "IS_REACHABLE" => {
-            parse_cpp_macro_expr(tokens, idx)
+        CppToken::Ident(ident) if ident == "1" => {
+            *idx += 1;
+            Some(CppCondition::Literal(true))
         }
+        CppToken::Ident(ident) if ident == "0" => {
+            *idx += 1;
+            Some(CppCondition::Literal(false))
+        }
+        CppToken::Ident(ident) if ident == "defined" => parse_defined_cpp_expr(tokens, idx),
+        CppToken::Ident(ident) if ident == "IS_ENABLED" => parse_cpp_macro_expr(tokens, idx),
+        CppToken::Ident(ident) if ident == "IS_REACHABLE" => parse_cpp_macro_expr(tokens, idx),
         CppToken::Ident(ident) => {
             *idx += 1;
-            Some(CppCondition::Symbol(
-                normalize_cpp_symbol(ident).to_string(),
-            ))
+            Some(CppCondition::Symbol(CppSymbol::Plain(ident.clone())))
         }
         _ => None,
     }
@@ -878,12 +1073,17 @@ fn parse_defined_cpp_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCon
         parse_cpp_ident(tokens, idx)?
     };
 
-    Some(CppCondition::Symbol(
-        normalize_cpp_symbol(&symbol).to_string(),
-    ))
+    Some(CppCondition::Symbol(CppSymbol::Defined(symbol)))
 }
 
 fn parse_cpp_macro_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondition> {
+    let symbol_kind = match tokens.get(*idx)? {
+        CppToken::Ident(ident) if ident == "IS_ENABLED" => CppSymbol::IsEnabled(String::new()),
+        CppToken::Ident(ident) if ident == "IS_REACHABLE" => {
+            CppSymbol::IsReachable(String::new())
+        }
+        _ => return None,
+    };
     *idx += 1;
     if !matches!(tokens.get(*idx), Some(CppToken::LParen)) {
         return None;
@@ -895,9 +1095,13 @@ fn parse_cpp_macro_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondi
     }
     *idx += 1;
 
-    Some(CppCondition::Symbol(
-        normalize_cpp_symbol(&symbol).to_string(),
-    ))
+    let symbol = match symbol_kind {
+        CppSymbol::IsEnabled(_) => CppSymbol::IsEnabled(symbol),
+        CppSymbol::IsReachable(_) => CppSymbol::IsReachable(symbol),
+        _ => unreachable!(),
+    };
+
+    Some(CppCondition::Symbol(symbol))
 }
 
 fn parse_cpp_ident(tokens: &[CppToken], idx: &mut usize) -> Option<String> {
@@ -910,12 +1114,12 @@ fn parse_cpp_ident(tokens: &[CppToken], idx: &mut usize) -> Option<String> {
     }
 }
 
-fn parse_cpp_symbol(token: &str) -> Option<&str> {
+fn parse_cpp_symbol(token: &str) -> Option<CppSymbol> {
     let symbol = token.trim();
     if symbol.is_empty() || symbol.contains(char::is_whitespace) || !is_cpp_identifier(symbol) {
         return None;
     }
-    Some(normalize_cpp_symbol(symbol))
+    Some(CppSymbol::Defined(symbol.to_string()))
 }
 
 fn is_cpp_identifier(token: &str) -> bool {
@@ -1201,6 +1405,22 @@ fn relative_to_root_path(root: &Path, path: &Path) -> PathBuf {
 mod tests {
     use super::*;
 
+    fn sym(symbol: &str) -> CppCondition {
+        CppCondition::Symbol(CppSymbol::Plain(symbol.to_string()))
+    }
+
+    fn defined_sym(symbol: &str) -> CppCondition {
+        CppCondition::Symbol(CppSymbol::Defined(symbol.to_string()))
+    }
+
+    fn is_enabled_sym(symbol: &str) -> CppCondition {
+        CppCondition::Symbol(CppSymbol::IsEnabled(symbol.to_string()))
+    }
+
+    fn is_reachable_sym(symbol: &str) -> CppCondition {
+        CppCondition::Symbol(CppSymbol::IsReachable(symbol.to_string()))
+    }
+
     #[test]
     fn test_manifest_config_truth_marks_removed_symbols_false_and_others_unknown() {
         let removed = [String::from("FOO")];
@@ -1216,41 +1436,39 @@ mod tests {
         let truth = ManifestConfigTruth::from_removed_configs(&removed);
 
         assert_eq!(
-            truth.condition_truth(&CppCondition::Symbol(String::from("FOO"))),
+            truth.condition_truth(&sym("FOO")),
             TruthValue::False
         );
         assert_eq!(
-            truth.condition_truth(&CppCondition::Not(Box::new(CppCondition::Symbol(
-                String::from("FOO"),
-            )))),
+            truth.condition_truth(&CppCondition::Not(Box::new(sym("FOO")))),
             TruthValue::True
         );
         assert_eq!(
             truth.condition_truth(&CppCondition::And(
-                Box::new(CppCondition::Symbol(String::from("BAR"))),
-                Box::new(CppCondition::Symbol(String::from("FOO"))),
+                Box::new(sym("BAR")),
+                Box::new(sym("FOO")),
             )),
             TruthValue::False
         );
         assert_eq!(
             truth.condition_truth(&CppCondition::Or(
-                Box::new(CppCondition::Symbol(String::from("BAR"))),
-                Box::new(CppCondition::Symbol(String::from("FOO"))),
+                Box::new(sym("BAR")),
+                Box::new(sym("FOO")),
             )),
             TruthValue::Unknown
         );
         assert_eq!(
             truth.condition_truth(&CppCondition::And(
                 Box::new(CppCondition::Or(
-                    Box::new(CppCondition::Symbol(String::from("BAR"))),
-                    Box::new(CppCondition::Symbol(String::from("BAZ"))),
+                    Box::new(sym("BAR")),
+                    Box::new(sym("BAZ")),
                 )),
-                Box::new(CppCondition::Symbol(String::from("FOO"))),
+                Box::new(sym("FOO")),
             )),
             TruthValue::False
         );
         assert_eq!(
-            truth.condition_truth(&CppCondition::Symbol(String::from("BAR"))),
+            truth.condition_truth(&sym("BAR")),
             TruthValue::Unknown
         );
     }
@@ -1259,8 +1477,8 @@ mod tests {
     fn test_cpp_condition_uses_sorted_removed_symbol_for_proof() {
         let removed = HashSet::from(["ZED", "ALPHA"]);
         let condition = CppCondition::Or(
-            Box::new(CppCondition::Symbol(String::from("ZED"))),
-            Box::new(CppCondition::Symbol(String::from("ALPHA"))),
+            Box::new(sym("ZED")),
+            Box::new(sym("ALPHA")),
         );
 
         assert_eq!(
@@ -1273,31 +1491,31 @@ mod tests {
     fn test_parse_cpp_directive_supports_if_forms() {
         assert_eq!(
             parse_cpp_directive("#ifdef CONFIG_FOO"),
-            Some(CppDirective::If(CppCondition::Symbol(String::from("FOO"))))
+            Some(CppDirective::If(defined_sym("CONFIG_FOO")))
         );
         assert_eq!(
             parse_cpp_directive("#ifndef CONFIG_FOO"),
-            Some(CppDirective::If(CppCondition::Not(Box::new(
-                CppCondition::Symbol(String::from("FOO"),)
-            ))))
+            Some(CppDirective::If(CppCondition::Not(Box::new(defined_sym(
+                "CONFIG_FOO",
+            )))))
         );
         assert_eq!(
             parse_cpp_directive("#if defined(CONFIG_FOO)"),
-            Some(CppDirective::If(CppCondition::Symbol(String::from("FOO"))))
+            Some(CppDirective::If(defined_sym("CONFIG_FOO")))
         );
         assert_eq!(
             parse_cpp_directive("#if !defined(CONFIG_FOO)"),
-            Some(CppDirective::If(CppCondition::Not(Box::new(
-                CppCondition::Symbol(String::from("FOO"),)
-            ))))
+            Some(CppDirective::If(CppCondition::Not(Box::new(defined_sym(
+                "CONFIG_FOO",
+            )))))
         );
         assert_eq!(
             parse_cpp_directive("#if IS_ENABLED(CONFIG_FOO)"),
-            Some(CppDirective::If(CppCondition::Symbol(String::from("FOO"))))
+            Some(CppDirective::If(is_enabled_sym("CONFIG_FOO")))
         );
         assert_eq!(
             parse_cpp_directive("#if IS_REACHABLE(CONFIG_FOO)"),
-            Some(CppDirective::If(CppCondition::Symbol(String::from("FOO"))))
+            Some(CppDirective::If(is_reachable_sym("CONFIG_FOO")))
         );
         assert_eq!(
             parse_cpp_directive(
@@ -1305,22 +1523,22 @@ mod tests {
             ),
             Some(CppDirective::If(CppCondition::And(
                 Box::new(CppCondition::Or(
-                    Box::new(CppCondition::Symbol(String::from("DEBUG"))),
-                    Box::new(CppCondition::Symbol(String::from("XFS_WARN"))),
+                    Box::new(defined_sym("DEBUG")),
+                    Box::new(defined_sym("XFS_WARN")),
                 )),
-                Box::new(CppCondition::Symbol(String::from("LOCKDEP"))),
+                Box::new(defined_sym("CONFIG_LOCKDEP")),
             )))
         );
         assert_eq!(
             parse_cpp_directive("#if defined CONFIG_PROVE_RCU || defined CONFIG_LOCKDEP"),
             Some(CppDirective::If(CppCondition::Or(
-                Box::new(CppCondition::Symbol(String::from("PROVE_RCU"))),
-                Box::new(CppCondition::Symbol(String::from("LOCKDEP"))),
+                Box::new(defined_sym("CONFIG_PROVE_RCU")),
+                Box::new(defined_sym("CONFIG_LOCKDEP")),
             )))
         );
         assert_eq!(
             parse_cpp_directive("#if(defined(CONFIG_FOO))"),
-            Some(CppDirective::If(CppCondition::Symbol(String::from("FOO"))))
+            Some(CppDirective::If(defined_sym("CONFIG_FOO")))
         );
         assert_eq!(
             parse_cpp_directive("#ifdef(CONFIG_FOO)"),
@@ -1334,15 +1552,11 @@ mod tests {
     fn test_parse_cpp_directive_supports_branch_chain_directives() {
         assert_eq!(
             parse_cpp_directive("#elif defined(CONFIG_BAR)"),
-            Some(CppDirective::Elif(CppCondition::Symbol(String::from(
-                "BAR"
-            ))))
+            Some(CppDirective::Elif(defined_sym("CONFIG_BAR")))
         );
         assert_eq!(
             parse_cpp_directive("#elif(defined(CONFIG_BAR))"),
-            Some(CppDirective::Elif(CppCondition::Symbol(String::from(
-                "BAR"
-            ))))
+            Some(CppDirective::Elif(defined_sym("CONFIG_BAR")))
         );
         assert_eq!(parse_cpp_directive("#else"), Some(CppDirective::Else));
         assert_eq!(parse_cpp_directive("#endif"), Some(CppDirective::Endif));
@@ -1750,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fold_removed_config_branches_reports_unresolved_removed_boolean_expression() {
+    fn test_fold_removed_config_branches_simplifies_mixed_removed_boolean_expression() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let path = root.join("drivers/test.c");
@@ -1759,22 +1973,40 @@ mod tests {
         std::fs::write(&path, original).unwrap();
 
         let report = fold_removed_config_branches_report(root, &[String::from("FOO")]).unwrap();
+        apply_fold_report(root, &report).unwrap();
 
-        assert!(report.edits.is_empty());
-        assert_eq!(report.unsupported_expressions.len(), 1);
+        assert_eq!(report.counts.branches_folded, 0);
+        assert_eq!(report.edits.len(), 1);
+        assert!(report.unsupported_expressions.is_empty());
         assert_eq!(
-            report.unsupported_expressions[0],
-            UnsupportedCppExpression {
-                file: PathBuf::from("drivers/test.c"),
-                line: 1,
-                directive: String::from("if"),
-                expression: String::from("defined(CONFIG_FOO) || defined(CONFIG_BAR)"),
-                reason: String::from(
-                    "preprocessor expression referencing removed symbols could not be resolved to a deterministic truth value",
-                ),
-            }
+            std::fs::read_to_string(&path).unwrap(),
+            "#if defined(CONFIG_BAR)\nint maybe_kept;\n#endif\n"
         );
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_fold_removed_config_branches_simplifies_mixed_removed_expression_preserving_macro_style()
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let path = root.join("drivers/test.c");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "#if defined(CONFIG_FOO) || IS_ENABLED(CONFIG_BAR)\nint maybe_kept;\n#endif\n",
+        )
+        .unwrap();
+
+        let report = fold_removed_config_branches_report(root, &[String::from("FOO")]).unwrap();
+        apply_fold_report(root, &report).unwrap();
+
+        assert_eq!(report.counts.branches_folded, 0);
+        assert_eq!(report.edits.len(), 1);
+        assert!(report.unsupported_expressions.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "#if IS_ENABLED(CONFIG_BAR)\nint maybe_kept;\n#endif\n"
+        );
     }
 
     #[test]
@@ -2106,7 +2338,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fold_removed_config_branches_leaves_elif_chain_untouched() {
+    fn test_fold_removed_config_branches_simplifies_removed_if_condition_inside_elif_chain() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         let path = root.join("drivers/test.c");
@@ -2124,8 +2356,19 @@ mod tests {
 
         let edits = fold_removed_config_branches(root, &[String::from("FOO")]).unwrap();
 
-        assert!(edits.is_empty());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            concat!(
+                "#if 0\n",
+                "int removed;\n",
+                "#elif defined(CONFIG_BAR)\n",
+                "int maybe_kept;\n",
+                "#else\n",
+                "int kept;\n",
+                "#endif\n",
+            )
+        );
     }
 
     #[test]
