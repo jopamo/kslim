@@ -403,6 +403,12 @@ fn insert_removed_kbuild_directory_refs(
     objects: &mut BTreeSet<KbuildObject>,
 ) -> Result<()> {
     for reference in &kbuild_index.directory_references {
+        if removed_dirs
+            .iter()
+            .any(|dir| normalized_relative_path_covers(dir, &reference.file))
+        {
+            continue;
+        }
         let current_dir = root.join(reference.file.parent().unwrap_or(Path::new("")));
         for candidate in
             crate::kbuild::make_dir_candidates(root, &current_dir, &reference.directory)

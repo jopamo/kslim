@@ -1424,6 +1424,29 @@ mod tests {
     }
 
     #[test]
+    fn test_from_slim_config_for_tree_skips_make_syntax_directory_refs_inside_removed_makefile() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("drivers/foo/bar/subdir")).unwrap();
+        std::fs::write(
+            tmp.path().join("drivers/foo/Makefile"),
+            "obj-y += $(VAR)/subdir/\n",
+        )
+        .unwrap();
+        let slim = SlimConfig {
+            remove_paths: vec!["drivers/foo".to_string()],
+            remove_configs: Vec::new(),
+            set_defaults: BTreeMap::new(),
+            unsafe_allow_root_path_removal: false,
+        };
+
+        let manifest = RemovalManifest::from_slim_config_for_tree(tmp.path(), &slim).unwrap();
+        let removed = kbuild_object_strings(manifest.removed_kbuild_objects_vec());
+
+        assert!(removed.contains(&String::from("drivers/foo/")));
+        assert!(!removed.iter().any(|path| path.contains('$')));
+    }
+
+    #[test]
     fn test_from_slim_config_for_tree_derives_stale_composite_kbuild_objects_from_index() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("drivers/foo")).unwrap();
