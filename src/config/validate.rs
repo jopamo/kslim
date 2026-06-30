@@ -660,9 +660,14 @@ fn validate_arch_policy_config(config: &ArchPolicyConfig) -> Result<()> {
     if config.allow_arch_local_removal && config.primary_arch.is_none() {
         anyhow::bail!("arch.allow_arch_local_removal requires arch.primary_arch");
     }
-    if !config.is_default() {
+    if config.allow_arch_local_removal {
         anyhow::bail!(
-            "arch policy config is parsed but not yet supported; use [[selftests.kernel_builds]].env ARCH until arch policy support lands"
+            "arch.allow_arch_local_removal is not yet supported; declare explicit slim.remove_paths for arch-local removals"
+        );
+    }
+    if !config.preserve_arch_shared {
+        anyhow::bail!(
+            "arch.preserve_arch_shared=false is not yet supported; shared-arch preservation must remain enabled"
         );
     }
     Ok(())

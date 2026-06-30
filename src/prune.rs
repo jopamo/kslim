@@ -1191,7 +1191,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn test_prune_unsupported_special_file_policy() {
+    fn test_prune_symlink_is_removed_like_file() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1199,9 +1199,33 @@ mod tests {
         std::fs::write(root.join("target"), "target\n").unwrap();
         symlink(root.join("target"), root.join("link")).unwrap();
 
-        let err = prune_declared_paths(
+        let result = prune_declared_paths(
             root,
             &[PathBuf::from("link")],
+            RemovalFailurePolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(result.files_removed, 1);
+        assert!(!root.join("link").exists());
+        assert!(root.join("target").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_prune_unsupported_special_file_policy() {
+        use std::os::unix::net::UnixListener;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("ks")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = tmp.path();
+        let socket_path = root.join("socket");
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+
+        let err = prune_declared_paths(
+            root,
+            &[PathBuf::from("socket")],
             RemovalFailurePolicy::default(),
         )
         .unwrap_err()
@@ -1210,11 +1234,11 @@ mod tests {
             err.contains("unsupported_special_file"),
             "unexpected error: {err}"
         );
-        assert!(root.join("link").exists());
+        assert!(socket_path.exists());
 
         let ignored = prune_declared_paths(
             root,
-            &[PathBuf::from("link")],
+            &[PathBuf::from("socket")],
             RemovalFailurePolicy {
                 ignore_unsupported_special_files: true,
                 ..RemovalFailurePolicy::default()
@@ -1226,12 +1250,12 @@ mod tests {
         assert_eq!(
             ignored.result.failed,
             vec![FailedRemoval::new(
-                PathBuf::from("link"),
+                PathBuf::from("socket"),
                 FailedRemovalKind::UnsupportedSpecialFile,
                 "path is not a regular file or directory",
             )]
         );
-        assert!(root.join("link").exists());
+        assert!(socket_path.exists());
     }
 
     #[test]

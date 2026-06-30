@@ -75,6 +75,7 @@ enum CppCondition {
     Not(Box<CppCondition>),
     And(Box<CppCondition>, Box<CppCondition>),
     Or(Box<CppCondition>, Box<CppCondition>),
+    Opaque(String),
     Unsupported(String),
 }
 
@@ -84,16 +85,7 @@ enum CppSymbol {
     Defined(String),
     IsEnabled(String),
     IsReachable(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CppToken {
-    Ident(String),
-    Not,
-    And,
-    Or,
-    LParen,
-    RParen,
+    IsBuiltin(String),
 }
 
 impl CppCondition {
@@ -106,7 +98,9 @@ impl CppCondition {
     fn collect_removed_symbols(&self, removed: &HashSet<&str>, symbols: &mut BTreeSet<String>) {
         match self {
             Self::Symbol(symbol) => {
-                let normalized = symbol.normalized_name();
+                let Some(normalized) = symbol.manifest_config_name() else {
+                    return;
+                };
                 if removed.contains(normalized) {
                     symbols.insert(normalized.to_string());
                 }
@@ -117,18 +111,26 @@ impl CppCondition {
                 lhs.collect_removed_symbols(removed, symbols);
                 rhs.collect_removed_symbols(removed, symbols);
             }
+            Self::Opaque(expression) => collect_removed_config_symbols_in_text(
+                expression,
+                removed,
+                symbols,
+            ),
             Self::Unsupported(_) => {}
         }
     }
 }
 
 impl CppSymbol {
-    fn normalized_name(&self) -> &str {
+    fn manifest_config_name(&self) -> Option<&str> {
         match self {
             Self::Plain(symbol)
             | Self::Defined(symbol)
             | Self::IsEnabled(symbol)
-            | Self::IsReachable(symbol) => normalize_cpp_symbol(symbol),
+            | Self::IsReachable(symbol)
+            | Self::IsBuiltin(symbol) => symbol
+                .strip_prefix("CONFIG_")
+                .filter(|normalized| !normalized.is_empty()),
         }
     }
 
@@ -138,7 +140,41 @@ impl CppSymbol {
             Self::Defined(symbol) => format!("defined({symbol})"),
             Self::IsEnabled(symbol) => format!("IS_ENABLED({symbol})"),
             Self::IsReachable(symbol) => format!("IS_REACHABLE({symbol})"),
+            Self::IsBuiltin(symbol) => format!("IS_BUILTIN({symbol})"),
         }
+    }
+}
+
+fn collect_removed_config_symbols_in_text(
+    expression: &str,
+    removed: &HashSet<&str>,
+    symbols: &mut BTreeSet<String>,
+) {
+    let mut token = String::new();
+
+    for ch in expression.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            token.push(ch);
+            continue;
+        }
+
+        collect_removed_config_symbol_token(&token, removed, symbols);
+        token.clear();
+    }
+
+    collect_removed_config_symbol_token(&token, removed, symbols);
+}
+
+fn collect_removed_config_symbol_token(
+    token: &str,
+    removed: &HashSet<&str>,
+    symbols: &mut BTreeSet<String>,
+) {
+    let Some(normalized) = token.strip_prefix("CONFIG_") else {
+        return;
+    };
+    if !normalized.is_empty() && removed.contains(normalized) {
+        symbols.insert(normalized.to_string());
     }
 }
 
@@ -163,7 +199,9 @@ impl<'a> ManifestConfigTruth<'a> {
 
     fn condition_truth(&self, condition: &CppCondition) -> TruthValue {
         match condition {
-            CppCondition::Symbol(symbol) => self.symbol_truth(symbol.normalized_name()),
+            CppCondition::Symbol(symbol) => symbol
+                .manifest_config_name()
+                .map_or(TruthValue::Unknown, |symbol| self.symbol_truth(symbol)),
             CppCondition::Literal(true) => TruthValue::True,
             CppCondition::Literal(false) => TruthValue::False,
             CppCondition::Not(inner) => match self.condition_truth(inner) {
@@ -189,6 +227,7 @@ impl<'a> ManifestConfigTruth<'a> {
                     _ => TruthValue::Unknown,
                 }
             }
+            CppCondition::Opaque(_) => TruthValue::Unknown,
             CppCondition::Unsupported(_) => TruthValue::Unknown,
         }
     }
@@ -196,7 +235,10 @@ impl<'a> ManifestConfigTruth<'a> {
     fn simplify_condition(&self, condition: &CppCondition) -> CppCondition {
         match condition {
             CppCondition::Symbol(symbol) => {
-                if self.removed.contains(symbol.normalized_name()) {
+                if symbol
+                    .manifest_config_name()
+                    .is_some_and(|symbol| self.removed.contains(symbol))
+                {
                     CppCondition::Literal(false)
                 } else {
                     CppCondition::Symbol(symbol.clone())
@@ -233,6 +275,7 @@ impl<'a> ManifestConfigTruth<'a> {
                     _ => CppCondition::Or(Box::new(lhs), Box::new(rhs)),
                 }
             }
+            CppCondition::Opaque(expression) => CppCondition::Opaque(expression.clone()),
             CppCondition::Unsupported(expression) => {
                 CppCondition::Unsupported(expression.clone())
             }
@@ -248,33 +291,10 @@ impl<'a> ManifestConfigTruth<'a> {
     }
 
     fn expression_mentions_removed_symbol(&self, expression: &str) -> bool {
-        let mut token = String::new();
-
-        for ch in expression.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '_' {
-                token.push(ch);
-                continue;
-            }
-
-            if cpp_token_mentions_removed_symbol(&token, &self.removed) {
-                return true;
-            }
-            token.clear();
-        }
-
-        cpp_token_mentions_removed_symbol(&token, &self.removed)
+        let mut symbols = BTreeSet::new();
+        collect_removed_config_symbols_in_text(expression, &self.removed, &mut symbols);
+        !symbols.is_empty()
     }
-}
-
-fn cpp_token_mentions_removed_symbol(token: &str, removed: &HashSet<&str>) -> bool {
-    if token.is_empty() {
-        return false;
-    }
-
-    removed.contains(token)
-        || token
-            .strip_prefix("CONFIG_")
-            .is_some_and(|symbol| removed.contains(symbol))
 }
 
 fn render_cpp_condition(condition: &CppCondition) -> String {
@@ -304,6 +324,7 @@ fn render_cpp_condition_with_precedence(condition: &CppCondition, parent_precede
             render_cpp_condition_with_precedence(lhs, precedence),
             render_cpp_condition_with_precedence(rhs, precedence)
         ),
+        CppCondition::Opaque(expression) => expression.clone(),
         CppCondition::Unsupported(expression) => expression.clone(),
     };
 
@@ -319,7 +340,10 @@ fn cpp_condition_precedence(condition: &CppCondition) -> u8 {
         CppCondition::Or(_, _) => 1,
         CppCondition::And(_, _) => 2,
         CppCondition::Not(_) => 3,
-        CppCondition::Symbol(_) | CppCondition::Literal(_) | CppCondition::Unsupported(_) => 4,
+        CppCondition::Symbol(_)
+        | CppCondition::Literal(_)
+        | CppCondition::Opaque(_)
+        | CppCondition::Unsupported(_) => 4,
     }
 }
 
@@ -353,7 +377,12 @@ pub(crate) fn fold_removed_config_branches_report(
         return Ok(CppFoldReport::default());
     }
 
-    let manifest_truth = ManifestConfigTruth::from_removed_configs(removed_configs);
+    let effective_removed_configs = effective_removed_configs(root, removed_configs)?;
+    if effective_removed_configs.is_empty() {
+        return Ok(CppFoldReport::default());
+    }
+
+    let manifest_truth = ManifestConfigTruth::from_removed_configs(&effective_removed_configs);
     let mut report = CppFoldReport::default();
 
     for path in c_family_files(root) {
@@ -391,6 +420,28 @@ pub(crate) fn fold_removed_config_branches_report(
     canonicalize_cpp_fold_report(&mut report);
 
     Ok(report)
+}
+
+fn effective_removed_configs(root: &Path, removed_configs: &[String]) -> Result<Vec<String>> {
+    let removed = removed_configs.iter().cloned().collect::<BTreeSet<_>>();
+    if removed.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut still_defined = BTreeSet::new();
+    for path in crate::kconfig::kconfig_files(root) {
+        for symbol in crate::kconfig::defined_symbols_in_file(&path)? {
+            if removed.contains(&symbol) {
+                still_defined.insert(symbol);
+            }
+        }
+    }
+
+    Ok(removed_configs
+        .iter()
+        .filter(|symbol| !still_defined.contains(symbol.as_str()))
+        .cloned()
+        .collect())
 }
 
 fn canonicalize_cpp_fold_report(report: &mut CppFoldReport) {
@@ -485,17 +536,18 @@ fn fold_lines_with_offset(
     let mut modified = false;
 
     while idx < lines.len() {
-        let line = lines[idx];
         let Some(CppDirective::If(condition)) =
-            parse_contextual_cpp_directive(line, &contexts[idx])
+            parse_contextual_cpp_directive_at(lines, &contexts, idx)
         else {
-            out.push(line.to_string());
+            out.push(lines[idx].to_string());
             idx += 1;
             continue;
         };
+        let directive_end = directive_physical_end(lines, idx);
+        let directive_before = join_lines(&lines[idx..=directive_end]);
 
         let Some(chain) = find_matching_directive(lines, &contexts, idx) else {
-            out.push(line.to_string());
+            out.push(lines[idx].to_string());
             idx += 1;
             continue;
         };
@@ -531,10 +583,10 @@ fn fold_lines_with_offset(
                     unsupported.extend(scan_unsupported_expressions(
                         root,
                         path,
-                        chain_lines,
-                        chain_contexts,
+                        &chain_lines[directive_end - idx + 1..],
+                        &chain_contexts[directive_end - idx + 1..],
                         manifest_truth,
-                        line_offset + idx,
+                        line_offset + directive_end + 1,
                     ));
                     idx = chain.endif_idx + 1;
                     continue;
@@ -542,14 +594,14 @@ fn fold_lines_with_offset(
 
                 let rewritten_line = render_cpp_if_line(&simplified_condition);
                 out.push(rewritten_line.clone());
-                copy_lines(&mut out, &chain_lines[1..]);
+                copy_lines(&mut out, &chain_lines[directive_end - idx + 1..]);
                 edits.push(EditRecord::new(
                     relative_to_root_path(root, path),
                     Some(LineRange {
                         start: line_offset + idx + 1,
-                        end: line_offset + idx + 1,
+                        end: line_offset + directive_end + 1,
                     }),
-                    format!("{line}\n"),
+                    directive_before.clone(),
                     format!("{rewritten_line}\n"),
                     EditReason::ManifestConfig {
                         symbol: symbol.clone(),
@@ -572,10 +624,12 @@ fn fold_lines_with_offset(
                 });
             }
             if !line_rewritten {
+                let expression = cpp_directive_expression_at(lines, &contexts, idx, "if");
                 if let Some(site) = unresolved_removed_condition_site(
                     root,
                     path,
-                    line,
+                    "if",
+                    expression.as_deref().unwrap_or_default(),
                     &condition,
                     manifest_truth,
                     line_offset + idx + 1,
@@ -586,10 +640,10 @@ fn fold_lines_with_offset(
             unsupported.extend(scan_unsupported_expressions(
                 root,
                 path,
-                chain_lines,
-                chain_contexts,
+                &chain_lines[directive_end - idx + 1..],
+                &chain_contexts[directive_end - idx + 1..],
                 manifest_truth,
-                line_offset + idx,
+                line_offset + directive_end + 1,
             ));
             idx = chain.endif_idx + 1;
             continue;
@@ -599,10 +653,10 @@ fn fold_lines_with_offset(
             unsupported.extend(scan_unsupported_expressions(
                 root,
                 path,
-                chain_lines,
-                chain_contexts,
+                &chain_lines[directive_end - idx + 1..],
+                &chain_contexts[directive_end - idx + 1..],
                 manifest_truth,
-                line_offset + idx,
+                line_offset + directive_end + 1,
             ));
             idx = chain.endif_idx + 1;
             continue;
@@ -611,14 +665,14 @@ fn fold_lines_with_offset(
             if simplified_condition != condition {
                 let rewritten_line = render_cpp_if_line(&simplified_condition);
                 out.push(rewritten_line.clone());
-                copy_lines(&mut out, &chain_lines[1..]);
+                copy_lines(&mut out, &chain_lines[directive_end - idx + 1..]);
                 edits.push(EditRecord::new(
                     relative_to_root_path(root, path),
                     Some(LineRange {
                         start: line_offset + idx + 1,
-                        end: line_offset + idx + 1,
+                        end: line_offset + directive_end + 1,
                     }),
-                    format!("{line}\n"),
+                    directive_before,
                     format!("{rewritten_line}\n"),
                     EditReason::ManifestConfig {
                         symbol: symbol.clone(),
@@ -633,17 +687,17 @@ fn fold_lines_with_offset(
             unsupported.extend(scan_unsupported_expressions(
                 root,
                 path,
-                chain_lines,
-                chain_contexts,
+                &chain_lines[directive_end - idx + 1..],
+                &chain_contexts[directive_end - idx + 1..],
                 manifest_truth,
-                line_offset + idx,
+                line_offset + directive_end + 1,
             ));
             idx = chain.endif_idx + 1;
             continue;
         }
 
         let (chosen_start, chosen_end) = if truth == TruthValue::True {
-            (idx + 1, chain.else_idx.unwrap_or(chain.endif_idx))
+            (directive_end + 1, chain.else_idx.unwrap_or(chain.endif_idx))
         } else if let Some(else_idx) = chain.else_idx {
             (else_idx + 1, chain.endif_idx)
         } else {
@@ -704,11 +758,12 @@ fn collect_dead_cpp_branch_lines(
 
     while idx < lines.len() {
         let Some(CppDirective::If(condition)) =
-            parse_contextual_cpp_directive(lines[idx], &contexts[idx])
+            parse_contextual_cpp_directive_at(lines, contexts, idx)
         else {
             idx += 1;
             continue;
         };
+        let directive_end = directive_physical_end(lines, idx);
 
         let Some(chain) = find_matching_directive(lines, contexts, idx) else {
             idx += 1;
@@ -723,7 +778,7 @@ fn collect_dead_cpp_branch_lines(
             continue;
         }
 
-        let true_start = idx + 1;
+        let true_start = directive_end + 1;
         let true_end = chain.else_idx.unwrap_or(chain.endif_idx);
         let else_range = chain
             .else_idx
@@ -837,27 +892,42 @@ fn mark_dead_cpp_branch_range(
 fn unresolved_removed_condition_site(
     root: &Path,
     path: &Path,
-    line: &str,
+    directive: &str,
+    expression: &str,
     condition: &CppCondition,
     manifest_truth: &ManifestConfigTruth<'_>,
     line_number: usize,
 ) -> Option<UnsupportedCppExpression> {
-    if matches!(condition, CppCondition::Unsupported(_))
-        || condition
-            .first_removed_symbol(&manifest_truth.removed)
-            .is_none()
+    let reason = if matches!(
+        condition,
+        CppCondition::Unsupported(_) | CppCondition::Opaque(_)
+    ) {
+        manifest_truth
+            .expression_mentions_removed_symbol(expression)
+            .then_some("preprocessor expression syntax referencing removed symbols is not supported")
+    } else if condition
+        .first_removed_symbol(&manifest_truth.removed)
+        .is_some()
+        && manifest_truth.condition_truth(condition) == TruthValue::Unknown
+        && manifest_truth.simplify_condition(condition) == *condition
     {
+        Some(
+            "preprocessor expression referencing removed symbols could not be resolved to a deterministic truth value",
+        )
+    } else {
+        None
+    };
+
+    let Some(reason) = reason else {
         return None;
-    }
+    };
 
     Some(UnsupportedCppExpression {
         file: relative_to_root_path(root, path),
         line: line_number,
-        directive: String::from("if"),
-        expression: cpp_directive_expression(line, "if")?.to_string(),
-        reason: String::from(
-            "preprocessor expression referencing removed symbols could not be resolved to a deterministic truth value",
-        ),
+        directive: directive.to_string(),
+        expression: expression.to_string(),
+        reason: reason.to_string(),
     })
 }
 
@@ -871,25 +941,26 @@ fn cpp_directive_expression<'a>(line: &'a str, directive: &str) -> Option<&'a st
 
 fn parse_cpp_directive(line: &str) -> Option<CppDirective> {
     let (directive, body) = split_cpp_directive(line)?;
+    let sanitized_body = strip_cpp_inline_comments(body);
 
     match directive {
         "ifdef" => Some(CppDirective::If(
-            parse_cpp_symbol(body)
+            parse_cpp_symbol(&sanitized_body)
                 .map(CppCondition::Symbol)
-                .unwrap_or_else(|| CppCondition::Unsupported(body.to_string())),
+                .unwrap_or_else(|| CppCondition::Unsupported(sanitized_body.clone())),
         )),
         "ifndef" => Some(CppDirective::If(
-            parse_cpp_symbol(body)
+            parse_cpp_symbol(&sanitized_body)
                 .map(|symbol| CppCondition::Not(Box::new(CppCondition::Symbol(symbol))))
-                .unwrap_or_else(|| CppCondition::Unsupported(body.to_string())),
+                .unwrap_or_else(|| CppCondition::Unsupported(sanitized_body.clone())),
         )),
         "if" => Some(CppDirective::If(
-            parse_cpp_condition(body)
-                .unwrap_or_else(|| CppCondition::Unsupported(body.to_string())),
+            parse_cpp_condition(&sanitized_body)
+                .unwrap_or_else(|| CppCondition::Unsupported(sanitized_body.clone())),
         )),
         "elif" => Some(CppDirective::Elif(
-            parse_cpp_condition(body)
-                .unwrap_or_else(|| CppCondition::Unsupported(body.to_string())),
+            parse_cpp_condition(&sanitized_body)
+                .unwrap_or_else(|| CppCondition::Unsupported(sanitized_body.clone())),
         )),
         "else" => Some(CppDirective::Else),
         "endif" => Some(CppDirective::Endif),
@@ -902,6 +973,35 @@ fn parse_contextual_cpp_directive(line: &str, context: &CppLineContext) -> Optio
         .directive_visible
         .then(|| parse_cpp_directive(line))
         .flatten()
+}
+
+fn parse_contextual_cpp_directive_at(
+    lines: &[&str],
+    contexts: &[CppLineContext],
+    idx: usize,
+) -> Option<CppDirective> {
+    contexts
+        .get(idx)
+        .is_some_and(|context| context.directive_visible)
+        .then(|| parse_cpp_directive(&logical_cpp_directive_line(lines, idx)))
+        .flatten()
+}
+
+fn cpp_directive_expression_at(
+    lines: &[&str],
+    contexts: &[CppLineContext],
+    idx: usize,
+    directive: &str,
+) -> Option<String> {
+    if !contexts
+        .get(idx)
+        .is_some_and(|context| context.directive_visible)
+    {
+        return None;
+    }
+
+    let logical = logical_cpp_directive_line(lines, idx);
+    cpp_directive_expression(&logical, directive).map(str::to_string)
 }
 
 fn split_cpp_directive(line: &str) -> Option<(&str, &str)> {
@@ -926,192 +1026,272 @@ fn split_cpp_directive(line: &str) -> Option<(&str, &str)> {
     Some((&rest[..end], rest[end..].trim()))
 }
 
+fn logical_cpp_directive_line(lines: &[&str], idx: usize) -> String {
+    let mut out = String::new();
+    let mut current = idx;
+
+    while current < lines.len() {
+        let line = lines[current];
+        let trimmed_end = line.trim_end();
+        let continued = trimmed_end.ends_with('\\');
+        let segment = if continued {
+            trimmed_end.strip_suffix('\\').unwrap_or(trimmed_end)
+        } else {
+            line
+        };
+
+        if current == idx {
+            out.push_str(segment);
+        } else {
+            out.push_str(segment.trim_start());
+        }
+
+        if !continued {
+            break;
+        }
+        current += 1;
+    }
+
+    out
+}
+
+fn directive_physical_end(lines: &[&str], idx: usize) -> usize {
+    let mut current = idx;
+    while current + 1 < lines.len() && cpp_line_continues(lines[current]) {
+        current += 1;
+    }
+    current
+}
+
+fn strip_cpp_inline_comments(input: &str) -> String {
+    let mut out = String::new();
+    let chars: Vec<char> = input.chars().collect();
+    let mut idx = 0usize;
+    let mut in_block_comment = false;
+
+    while idx < chars.len() {
+        if in_block_comment {
+            if chars[idx] == '*' && chars.get(idx + 1) == Some(&'/') {
+                in_block_comment = false;
+                idx += 2;
+            } else {
+                idx += 1;
+            }
+            continue;
+        }
+
+        if chars[idx] == '/' && chars.get(idx + 1) == Some(&'*') {
+            in_block_comment = true;
+            idx += 2;
+            continue;
+        }
+        if chars[idx] == '/' && chars.get(idx + 1) == Some(&'/') {
+            break;
+        }
+
+        out.push(chars[idx]);
+        idx += 1;
+    }
+
+    out.trim().to_string()
+}
+
 fn parse_cpp_condition(expr: &str) -> Option<CppCondition> {
     let expr = expr.trim();
     if expr.is_empty() {
         return None;
     }
 
-    let Some(tokens) = tokenize_cpp_expr(expr) else {
-        return Some(CppCondition::Unsupported(expr.to_string()));
-    };
-
-    let mut idx = 0usize;
-    let Some(condition) = parse_cpp_or_expr(&tokens, &mut idx) else {
-        return Some(CppCondition::Unsupported(expr.to_string()));
-    };
-    if idx != tokens.len() {
+    if !cpp_parentheses_balanced(expr) {
         return Some(CppCondition::Unsupported(expr.to_string()));
     }
 
-    Some(condition)
+    Some(parse_cpp_condition_inner(expr))
 }
 
-fn tokenize_cpp_expr(input: &str) -> Option<Vec<CppToken>> {
-    let mut tokens = Vec::new();
-    let chars: Vec<char> = input.chars().collect();
+fn parse_cpp_condition_inner(expr: &str) -> CppCondition {
+    let expr = expr.trim();
+    if let Some(parts) = split_top_level_cpp_operator(expr, "||") {
+        return fold_cpp_condition_parts(parts, CppCondition::Or);
+    }
+    if let Some(parts) = split_top_level_cpp_operator(expr, "&&") {
+        return fold_cpp_condition_parts(parts, CppCondition::And);
+    }
+
+    let without_bang = expr.trim_start();
+    if let Some(rest) = without_bang.strip_prefix('!') {
+        let rest = rest.trim_start();
+        if !rest.starts_with('=') && !rest.is_empty() {
+            return CppCondition::Not(Box::new(parse_cpp_condition_inner(rest)));
+        }
+    }
+
+    if let Some(inner) = strip_outer_balanced_parens(expr) {
+        let parsed_inner = parse_cpp_condition_inner(inner);
+        return match parsed_inner {
+            CppCondition::Opaque(_) => CppCondition::Opaque(expr.to_string()),
+            other => other,
+        };
+    }
+
+    if expr == "1" {
+        return CppCondition::Literal(true);
+    }
+    if expr == "0" {
+        return CppCondition::Literal(false);
+    }
+    if let Some(symbol) = parse_defined_cpp_expr(expr) {
+        return CppCondition::Symbol(CppSymbol::Defined(symbol));
+    }
+    if let Some(symbol) = parse_cpp_macro_expr(expr) {
+        return CppCondition::Symbol(symbol);
+    }
+    if is_cpp_identifier(expr) {
+        return CppCondition::Symbol(CppSymbol::Plain(expr.to_string()));
+    }
+
+    CppCondition::Opaque(expr.to_string())
+}
+
+fn split_top_level_cpp_operator<'a>(expr: &'a str, operator: &str) -> Option<Vec<&'a str>> {
+    let bytes = expr.as_bytes();
+    let operator_bytes = operator.as_bytes();
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
     let mut idx = 0usize;
 
-    while idx < chars.len() {
-        match chars[idx] {
-            ' ' | '\t' => idx += 1,
-            '!' => {
-                tokens.push(CppToken::Not);
-                idx += 1;
-            }
-            '&' => {
-                if chars.get(idx + 1) != Some(&'&') {
-                    return None;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'(' => depth += 1,
+            b')' => {
+                if depth == 0 {
+                    return Some(vec![""]);
                 }
-                tokens.push(CppToken::And);
-                idx += 2;
+                depth -= 1;
             }
-            '|' => {
-                if chars.get(idx + 1) != Some(&'|') {
-                    return None;
-                }
-                tokens.push(CppToken::Or);
-                idx += 2;
+            _ if depth == 0
+                && idx + operator_bytes.len() <= bytes.len()
+                && &bytes[idx..idx + operator_bytes.len()] == operator_bytes =>
+            {
+                parts.push(expr[start..idx].trim());
+                idx += operator_bytes.len();
+                start = idx;
+                continue;
             }
-            '(' => {
-                tokens.push(CppToken::LParen);
-                idx += 1;
-            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    if depth != 0 {
+        return Some(vec![""]);
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(expr[start..].trim());
+    Some(parts)
+}
+
+fn fold_cpp_condition_parts<F>(parts: Vec<&str>, combine: F) -> CppCondition
+where
+    F: Fn(Box<CppCondition>, Box<CppCondition>) -> CppCondition,
+{
+    let mut iter = parts.into_iter();
+    let first = iter
+        .next()
+        .filter(|part| !part.is_empty())
+        .map(parse_cpp_condition_inner)
+        .unwrap_or_else(|| CppCondition::Unsupported(String::new()));
+
+    iter.fold(first, |lhs, rhs| {
+        if rhs.is_empty() {
+            CppCondition::Unsupported(String::new())
+        } else {
+            combine(Box::new(lhs), Box::new(parse_cpp_condition_inner(rhs)))
+        }
+    })
+}
+
+fn strip_outer_balanced_parens(expr: &str) -> Option<&str> {
+    let expr = expr.trim();
+    if !expr.starts_with('(') || !expr.ends_with(')') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    for (idx, ch) in expr.char_indices() {
+        match ch {
+            '(' => depth += 1,
             ')' => {
-                tokens.push(CppToken::RParen);
-                idx += 1;
-            }
-            ch if ch.is_ascii_alphanumeric() || ch == '_' => {
-                let start = idx;
-                idx += 1;
-                while idx < chars.len() && (chars[idx].is_ascii_alphanumeric() || chars[idx] == '_')
-                {
-                    idx += 1;
+                depth = depth.checked_sub(1)?;
+                if depth == 0 && idx != expr.len() - 1 {
+                    return None;
                 }
-                tokens.push(CppToken::Ident(chars[start..idx].iter().collect()));
             }
-            _ => return None,
+            _ => {}
         }
     }
 
-    (!tokens.is_empty()).then_some(tokens)
+    (depth == 0).then_some(&expr[1..expr.len() - 1])
 }
 
-fn parse_cpp_or_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondition> {
-    let mut expr = parse_cpp_and_expr(tokens, idx)?;
-    while matches!(tokens.get(*idx), Some(CppToken::Or)) {
-        *idx += 1;
-        let rhs = parse_cpp_and_expr(tokens, idx)?;
-        expr = CppCondition::Or(Box::new(expr), Box::new(rhs));
-    }
-    Some(expr)
-}
-
-fn parse_cpp_and_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondition> {
-    let mut expr = parse_cpp_unary_expr(tokens, idx)?;
-    while matches!(tokens.get(*idx), Some(CppToken::And)) {
-        *idx += 1;
-        let rhs = parse_cpp_unary_expr(tokens, idx)?;
-        expr = CppCondition::And(Box::new(expr), Box::new(rhs));
-    }
-    Some(expr)
-}
-
-fn parse_cpp_unary_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondition> {
-    if matches!(tokens.get(*idx), Some(CppToken::Not)) {
-        *idx += 1;
-        return Some(CppCondition::Not(Box::new(parse_cpp_unary_expr(
-            tokens, idx,
-        )?)));
-    }
-    parse_cpp_primary_expr(tokens, idx)
-}
-
-fn parse_cpp_primary_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondition> {
-    match tokens.get(*idx)? {
-        CppToken::LParen => {
-            *idx += 1;
-            let expr = parse_cpp_or_expr(tokens, idx)?;
-            match tokens.get(*idx) {
-                Some(CppToken::RParen) => {
-                    *idx += 1;
-                    Some(expr)
-                }
-                _ => None,
+fn cpp_parentheses_balanced(expr: &str) -> bool {
+    let mut depth = 0usize;
+    for ch in expr.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                let Some(next_depth) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next_depth;
             }
+            _ => {}
         }
-        CppToken::Ident(ident) if ident == "1" => {
-            *idx += 1;
-            Some(CppCondition::Literal(true))
-        }
-        CppToken::Ident(ident) if ident == "0" => {
-            *idx += 1;
-            Some(CppCondition::Literal(false))
-        }
-        CppToken::Ident(ident) if ident == "defined" => parse_defined_cpp_expr(tokens, idx),
-        CppToken::Ident(ident) if ident == "IS_ENABLED" => parse_cpp_macro_expr(tokens, idx),
-        CppToken::Ident(ident) if ident == "IS_REACHABLE" => parse_cpp_macro_expr(tokens, idx),
-        CppToken::Ident(ident) => {
-            *idx += 1;
-            Some(CppCondition::Symbol(CppSymbol::Plain(ident.clone())))
-        }
-        _ => None,
     }
+    depth == 0
 }
 
-fn parse_defined_cpp_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondition> {
-    *idx += 1;
-    let symbol = if matches!(tokens.get(*idx), Some(CppToken::LParen)) {
-        *idx += 1;
-        let symbol = parse_cpp_ident(tokens, idx)?;
-        if !matches!(tokens.get(*idx), Some(CppToken::RParen)) {
+fn parse_defined_cpp_expr(expr: &str) -> Option<String> {
+    let expr = expr.trim();
+    let rest = expr.strip_prefix("defined")?.trim_start();
+    if let Some(rest) = rest.strip_prefix('(') {
+        let rest = rest.trim_start();
+        let end = rest.find(')')?;
+        let symbol = rest[..end].trim();
+        let trailing = rest[end + 1..].trim();
+        if !trailing.is_empty() || !is_cpp_identifier(symbol) {
             return None;
         }
-        *idx += 1;
-        symbol
-    } else {
-        parse_cpp_ident(tokens, idx)?
-    };
+        return Some(symbol.to_string());
+    }
 
-    Some(CppCondition::Symbol(CppSymbol::Defined(symbol)))
+    is_cpp_identifier(rest).then(|| rest.to_string())
 }
 
-fn parse_cpp_macro_expr(tokens: &[CppToken], idx: &mut usize) -> Option<CppCondition> {
-    let symbol_kind = match tokens.get(*idx)? {
-        CppToken::Ident(ident) if ident == "IS_ENABLED" => CppSymbol::IsEnabled(String::new()),
-        CppToken::Ident(ident) if ident == "IS_REACHABLE" => {
-            CppSymbol::IsReachable(String::new())
+fn parse_cpp_macro_expr(expr: &str) -> Option<CppSymbol> {
+    for (name, ctor) in [
+        ("IS_ENABLED", CppSymbol::IsEnabled as fn(String) -> CppSymbol),
+        ("IS_REACHABLE", CppSymbol::IsReachable as fn(String) -> CppSymbol),
+        ("IS_BUILTIN", CppSymbol::IsBuiltin as fn(String) -> CppSymbol),
+    ] {
+        let Some(rest) = expr.strip_prefix(name) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix('(')?.trim_start();
+        let end = rest.find(')')?;
+        let symbol = rest[..end].trim();
+        let trailing = rest[end + 1..].trim();
+        if trailing.is_empty() && is_cpp_identifier(symbol) {
+            return Some(ctor(symbol.to_string()));
         }
-        _ => return None,
-    };
-    *idx += 1;
-    if !matches!(tokens.get(*idx), Some(CppToken::LParen)) {
-        return None;
     }
-    *idx += 1;
-    let symbol = parse_cpp_ident(tokens, idx)?;
-    if !matches!(tokens.get(*idx), Some(CppToken::RParen)) {
-        return None;
-    }
-    *idx += 1;
 
-    let symbol = match symbol_kind {
-        CppSymbol::IsEnabled(_) => CppSymbol::IsEnabled(symbol),
-        CppSymbol::IsReachable(_) => CppSymbol::IsReachable(symbol),
-        _ => unreachable!(),
-    };
-
-    Some(CppCondition::Symbol(symbol))
-}
-
-fn parse_cpp_ident(tokens: &[CppToken], idx: &mut usize) -> Option<String> {
-    match tokens.get(*idx)? {
-        CppToken::Ident(ident) if is_cpp_identifier(ident) => {
-            *idx += 1;
-            Some(ident.clone())
-        }
-        _ => None,
-    }
+    None
 }
 
 fn parse_cpp_symbol(token: &str) -> Option<CppSymbol> {
@@ -1131,10 +1311,6 @@ fn is_cpp_identifier(token: &str) -> bool {
         return false;
     }
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-}
-
-fn normalize_cpp_symbol(token: &str) -> &str {
-    token.strip_prefix("CONFIG_").unwrap_or(token)
 }
 
 fn find_matching_directive(
@@ -1341,35 +1517,26 @@ fn scan_unsupported_expressions(
 ) -> Vec<UnsupportedCppExpression> {
     lines
         .iter()
-        .zip(contexts)
         .enumerate()
-        .filter_map(|(idx, (line, context))| match parse_contextual_cpp_directive(line, context) {
-            Some(CppDirective::If(CppCondition::Unsupported(expression)))
-                if manifest_truth.expression_mentions_removed_symbol(&expression) =>
-            {
-                Some(UnsupportedCppExpression {
-                    file: relative_to_root_path(root, path),
-                    line: base_line + idx + 1,
-                    directive: String::from("if"),
-                    expression: expression.to_string(),
-                    reason: String::from(
-                        "preprocessor expression syntax referencing removed symbols is not supported",
-                    ),
-                })
-            }
-            Some(CppDirective::Elif(CppCondition::Unsupported(expression)))
-                if manifest_truth.expression_mentions_removed_symbol(&expression) =>
-            {
-                Some(UnsupportedCppExpression {
-                    file: relative_to_root_path(root, path),
-                    line: base_line + idx + 1,
-                    directive: String::from("elif"),
-                    expression: expression.to_string(),
-                    reason: String::from(
-                        "preprocessor expression syntax referencing removed symbols is not supported",
-                    ),
-                })
-            }
+        .filter_map(|(idx, _)| match parse_contextual_cpp_directive_at(lines, contexts, idx) {
+            Some(CppDirective::If(condition)) => unresolved_removed_condition_site(
+                root,
+                path,
+                "if",
+                &cpp_directive_expression_at(lines, contexts, idx, "if").unwrap_or_default(),
+                &condition,
+                manifest_truth,
+                base_line + idx + 1,
+            ),
+            Some(CppDirective::Elif(condition)) => unresolved_removed_condition_site(
+                root,
+                path,
+                "elif",
+                &cpp_directive_expression_at(lines, contexts, idx, "elif").unwrap_or_default(),
+                &condition,
+                manifest_truth,
+                base_line + idx + 1,
+            ),
             _ => None,
         })
         .collect()
@@ -1436,24 +1603,24 @@ mod tests {
         let truth = ManifestConfigTruth::from_removed_configs(&removed);
 
         assert_eq!(
-            truth.condition_truth(&sym("FOO")),
+            truth.condition_truth(&sym("CONFIG_FOO")),
             TruthValue::False
         );
         assert_eq!(
-            truth.condition_truth(&CppCondition::Not(Box::new(sym("FOO")))),
+            truth.condition_truth(&CppCondition::Not(Box::new(sym("CONFIG_FOO")))),
             TruthValue::True
         );
         assert_eq!(
             truth.condition_truth(&CppCondition::And(
                 Box::new(sym("BAR")),
-                Box::new(sym("FOO")),
+                Box::new(sym("CONFIG_FOO")),
             )),
             TruthValue::False
         );
         assert_eq!(
             truth.condition_truth(&CppCondition::Or(
                 Box::new(sym("BAR")),
-                Box::new(sym("FOO")),
+                Box::new(sym("CONFIG_FOO")),
             )),
             TruthValue::Unknown
         );
@@ -1463,7 +1630,7 @@ mod tests {
                     Box::new(sym("BAR")),
                     Box::new(sym("BAZ")),
                 )),
-                Box::new(sym("FOO")),
+                Box::new(sym("CONFIG_FOO")),
             )),
             TruthValue::False
         );
@@ -1477,8 +1644,8 @@ mod tests {
     fn test_cpp_condition_uses_sorted_removed_symbol_for_proof() {
         let removed = HashSet::from(["ZED", "ALPHA"]);
         let condition = CppCondition::Or(
-            Box::new(sym("ZED")),
-            Box::new(sym("ALPHA")),
+            Box::new(sym("CONFIG_ZED")),
+            Box::new(sym("CONFIG_ALPHA")),
         );
 
         assert_eq!(
@@ -1960,6 +2127,23 @@ mod tests {
                 ),
             }
         );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn test_fold_removed_config_branches_ignores_symbol_still_defined_in_live_kconfig() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("Kconfig"), "config FOO\n\tbool\n").unwrap();
+        let path = root.join("drivers/test.c");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = "#if FOO > 1\nint maybe_kept;\n#endif\n";
+        std::fs::write(&path, original).unwrap();
+
+        let report = fold_removed_config_branches_report(root, &[String::from("FOO")]).unwrap();
+
+        assert!(report.edits.is_empty());
+        assert!(report.unsupported_expressions.is_empty());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 

@@ -91,33 +91,39 @@ fn arch_policy_config_is_profile_arch_policy_model() {
             && config_validate.contains("must not contain duplicate architecture")
             && config_validate.contains("cannot be declared in both arch.secondary_arches and arch.disabled_arches")
             && config_validate.contains("arch.allow_arch_local_removal requires arch.primary_arch")
-            && config_validate.contains("arch policy config is parsed but not yet supported")
+            && config_validate.contains("arch.allow_arch_local_removal is not yet supported")
+            && config_validate.contains("arch.preserve_arch_shared=false is not yet supported")
             && config_validate.contains("validate_arch_policy_config(&profile.arch)?"),
-        "profile validation should validate arch names and fail closed for nondefault ArchPolicyConfig"
+        "profile validation should validate arch names and fail closed for unsupported arch-policy switches"
     );
     assert!(
         config_templates.contains("arch: ArchPolicyConfig::default()")
             && config_templates.contains("[arch]")
             && config_templates.contains("primary_arch = \"x86\"")
-            && config_templates.contains("secondary_arches = [\"arm64\"]")
-            && config_templates.contains("Use `[[selftests.kernel_builds]].env.ARCH`"),
-        "profile templates should show ArchPolicyConfig as future fail-closed policy"
+            && config_templates.contains("secondary_arches = [\"arm64\", \"riscv\"]")
+            && config_templates.contains("Kconfig trees are treated as")
+            && config_templates.contains("dead-definition solver proofs"),
+        "profile templates should describe the supported live-arch proof scope"
     );
     assert!(
-        !generate_state.contains("profile.arch"),
-        "generate state must not silently consume ArchPolicyConfig before arch policy support lands"
+        generate_state.contains("pub(crate) arch_policy: ArchPolicyConfig,")
+            && generate_state.contains("arch_policy: profile.arch.clone()")
+            && generate_state.contains("arch_policy_fingerprint"),
+        "resolved state should carry ArchPolicyConfig into prune planning and fingerprint truth"
     );
     assert!(
         architecture_flat
             .contains("`ArchPolicyConfig` is the `[arch]` profile architecture-policy model")
             && architecture_flat.contains("primary, secondary, and disabled architecture names")
-            && architecture_flat.contains("fails closed until resolved arch-policy planning lands"),
-        "architecture docs should describe ArchPolicyConfig ownership and fail-closed behavior"
+            && architecture_flat.contains("constrains which `arch/*` Kconfig trees are treated as live")
+            && architecture_flat.contains("`allow_arch_local_removal` remains reserved"),
+        "architecture docs should describe the supported live-arch proof scope and reserved switches"
     );
     assert!(
         kernel_build_guide.contains("[arch]")
-            && kernel_build_guide.contains("arch policy support lands")
-            && kernel_build_guide.contains("Use `[[selftests.kernel_builds]].env.ARCH`"),
-        "kernel build iteration docs should explain ArchPolicyConfig is not active yet"
+            && kernel_build_guide.contains("dead-definition solver proofs")
+            && kernel_build_guide.contains("slim.remove_paths")
+            && kernel_build_guide.contains("[[selftests.kernel_builds]].env.ARCH"),
+        "kernel build iteration docs should explain the active arch-policy slice"
     );
 }

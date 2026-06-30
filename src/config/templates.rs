@@ -96,13 +96,14 @@ remove_configs = ["DRM_AMDGPU", "DRM_AMDGPU_SI"]
 # allow_public_header_removal = false
 # allow_uapi_header_removal = false
 
-# Future architecture policy is parsed but currently fails validation until
-# arch policy support lands. Use `[[selftests.kernel_builds]].env.ARCH` for
-# effective build coverage today.
+# Architecture policy constrains which `arch/*` Kconfig trees are treated as
+# live for dead-definition solver proofs. It does not replace explicit
+# `slim.remove_paths` removals or `[[selftests.kernel_builds]].env.ARCH`
+# coverage.
 #
 # [arch]
 # primary_arch = "x86"
-# secondary_arches = ["arm64"]
+# secondary_arches = ["arm64", "riscv"]
 # disabled_arches = []
 # allow_arch_local_removal = false
 # preserve_arch_shared = true
@@ -312,14 +313,15 @@ allow_uapi_header_removal = false
 
 Public-header approval does not approve UAPI removal; UAPI uses its own flag.
 
-Future architecture policy is parsed but currently fails validation until arch
-policy support lands. Use `[[selftests.kernel_builds]].env.ARCH` for effective
-build coverage today.
+Architecture policy constrains which `arch/*` Kconfig trees are treated as
+live for dead-definition solver proofs. It does not replace explicit
+`slim.remove_paths` removals or `[[selftests.kernel_builds]].env.ARCH`
+coverage.
 
 ```toml
 [arch]
 primary_arch = "x86"
-secondary_arches = ["arm64"]
+secondary_arches = ["arm64", "riscv"]
 disabled_arches = []
 allow_arch_local_removal = false
 preserve_arch_shared = true

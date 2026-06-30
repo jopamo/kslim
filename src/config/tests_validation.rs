@@ -257,7 +257,7 @@ kind = "subsystem"
     assert!(err.contains("feature 'bluetooth' cannot be declared in both"));
 }
 #[test]
-fn test_validate_profile_rejects_nondefault_arch_policy_until_supported() {
+fn test_validate_profile_accepts_supported_arch_policy_scope() {
     let profile: ProfileConfig = toml::from_str(
         r#"
 [profile]
@@ -268,14 +268,12 @@ ref = "v1.0"
 
 [arch]
 primary_arch = "x86"
+secondary_arches = ["arm64", "riscv"]
 "#,
     )
     .unwrap();
 
-    let err = validate_profile(&profile).unwrap_err().to_string();
-
-    assert!(err.contains("arch policy config is parsed but not yet supported"));
-    assert!(err.contains("[[selftests.kernel_builds]].env ARCH"));
+    validate_profile(&profile).unwrap();
 }
 #[test]
 fn test_validate_profile_rejects_invalid_arch_policy_value() {
@@ -340,6 +338,51 @@ allow_arch_local_removal = true
     let err = validate_profile(&profile).unwrap_err().to_string();
 
     assert!(err.contains("arch.allow_arch_local_removal requires arch.primary_arch"));
+}
+
+#[test]
+fn test_validate_profile_rejects_arch_local_removal_until_supported() {
+    let profile: ProfileConfig = toml::from_str(
+        r#"
+[profile]
+name = "default"
+
+[base]
+ref = "v1.0"
+
+[arch]
+primary_arch = "x86"
+allow_arch_local_removal = true
+"#,
+    )
+    .unwrap();
+
+    let err = validate_profile(&profile).unwrap_err().to_string();
+
+    assert!(err.contains("arch.allow_arch_local_removal is not yet supported"));
+    assert!(err.contains("slim.remove_paths"));
+}
+
+#[test]
+fn test_validate_profile_rejects_disabling_arch_shared_preservation_until_supported() {
+    let profile: ProfileConfig = toml::from_str(
+        r#"
+[profile]
+name = "default"
+
+[base]
+ref = "v1.0"
+
+[arch]
+primary_arch = "x86"
+preserve_arch_shared = false
+"#,
+    )
+    .unwrap();
+
+    let err = validate_profile(&profile).unwrap_err().to_string();
+
+    assert!(err.contains("arch.preserve_arch_shared=false is not yet supported"));
 }
 #[test]
 fn test_validate_profile_rejects_nondefault_build_matrix_until_supported() {

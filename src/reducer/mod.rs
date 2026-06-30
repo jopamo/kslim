@@ -25,6 +25,7 @@ pub(crate) use pipeline::run_reducer_after_declared_prune;
 pub use pipeline::{
     run, run_reducer, run_reducer_for_profile, run_reducer_with_abi_policy,
     run_reducer_with_abi_policy_and_preservation,
+    run_reducer_with_policies_and_preservation,
 };
 pub use report::ensure_supported_fallout;
 #[cfg(test)]

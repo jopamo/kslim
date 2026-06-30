@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    AbiPolicyConfig, BuildMatrixConfig, FeatureIntentConfig, FeatureReportModeConfig,
+    AbiPolicyConfig, ArchPolicyConfig, BuildMatrixConfig, FeatureIntentConfig,
+    FeatureReportModeConfig,
     FeatureSafetyLevel, FeatureTestMatrixConfig, KernelBuildConfig, KslimConfig, ProfileConfig,
     ReducerConfig, SelfTestConfig,
 };
@@ -418,7 +419,8 @@ impl ResolvedCandidateState {
             AbiPolicyFingerprint::from_policy(feature_resolution.abi_policy())?;
         let arch_policy_fingerprint = ArchPolicyFingerprint::from_profile(profile)?;
         let abi_decision = AbiDecisionState::from_feature_resolution(&feature_resolution)?;
-        let prune_plan = PrunePlan::from_feature_resolution(&feature_resolution);
+        let prune_plan =
+            PrunePlan::from_profile_and_feature_resolution(profile, &feature_resolution);
         let output_plan = OutputPlan::new(config, profile, &base, target_branch, mode)?;
         Ok(Self {
             base,
@@ -1228,11 +1230,15 @@ pub(crate) struct PrunePlan {
     pub(crate) preserve_configs: Vec<KconfigSymbol>,
     pub(crate) set_defaults: BTreeMap<KconfigSymbol, String>,
     pub(crate) abi_policy: AbiPolicyConfig,
+    pub(crate) arch_policy: ArchPolicyConfig,
     pub(crate) unsafe_allow_root_path_removal: bool,
 }
 
 impl PrunePlan {
-    fn from_feature_resolution(resolution: &FeatureResolutionState) -> Self {
+    fn from_profile_and_feature_resolution(
+        profile: &ProfileConfig,
+        resolution: &FeatureResolutionState,
+    ) -> Self {
         Self {
             remove_paths: resolution.remove_paths.clone(),
             remove_configs: resolution.remove_configs.clone(),
@@ -1240,6 +1246,7 @@ impl PrunePlan {
             preserve_configs: resolution.preserve_configs.clone(),
             set_defaults: resolution.set_defaults.clone(),
             abi_policy: resolution.abi_policy.clone(),
+            arch_policy: profile.arch.clone(),
             unsafe_allow_root_path_removal: resolution.unsafe_allow_root_path_removal,
         }
     }

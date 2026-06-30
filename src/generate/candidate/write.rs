@@ -373,12 +373,14 @@ fn removal_manifest_from_prune_plan_for_tree(
     plan: &PrunePlan,
 ) -> Result<RemovalManifest> {
     let preservation = preservation_input_from_prune_plan(plan);
-    RemovalManifest::from_slim_config_for_tree_with_abi_policy_and_preservation(
+    let mut manifest = RemovalManifest::from_slim_config_for_tree_with_abi_policy_and_preservation(
         root,
         &slim_config_from_prune_plan(plan),
         preservation.as_ref(),
         &plan.abi_policy,
-    )
+    )?;
+    manifest.arch_policy = plan.arch_policy.clone();
+    Ok(manifest)
 }
 
 fn slim_config_from_prune_plan(plan: &PrunePlan) -> SlimConfig {
@@ -453,13 +455,14 @@ fn run_candidate_reducer(
     let preservation = preservation_input_from_prune_plan(&plan.resolved.prune_plan);
     let kernel_root = target.kernel_source_root()?;
     let tree_path = kernel_root.as_path();
-    let manifest = RemovalManifest::from_slim_config_for_tree_with_abi_policy_and_preservation(
+    let mut manifest = RemovalManifest::from_slim_config_for_tree_with_abi_policy_and_preservation(
         tree_path,
         &slim,
         preservation.as_ref(),
         &plan.resolved.prune_plan.abi_policy,
     )
     .with_context(|| CandidateBuildStageFailure::new(GenerateStage::Reduce))?;
+    manifest.arch_policy = plan.resolved.prune_plan.arch_policy.clone();
     if manifest.is_noop() {
         return Ok(None);
     }
@@ -473,12 +476,13 @@ fn run_candidate_reducer(
             declared_prune,
             &reducer_config,
         ),
-        None => reducer::run_reducer_with_abi_policy_and_preservation(
+        None => reducer::run_reducer_with_policies_and_preservation(
             &kernel_root,
             &slim,
             preservation.as_ref(),
             &reducer_config,
             &plan.resolved.prune_plan.abi_policy,
+            &plan.resolved.prune_plan.arch_policy,
         ),
     }
     .context("failed to run resolved candidate reducer")
@@ -531,12 +535,13 @@ pub(in crate::generate) fn reduce_tree(
     let abi_policy = profile.effective_abi_policy();
 
     let kernel_root = target.kernel_source_root()?;
-    let result = reducer::run_reducer_with_abi_policy_and_preservation(
+    let result = reducer::run_reducer_with_policies_and_preservation(
         &kernel_root,
         &removal_input,
         preservation_input.as_ref(),
         &profile.reducer,
         &abi_policy,
+        &profile.arch,
     )?;
     Ok(result.stats)
 }

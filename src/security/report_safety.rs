@@ -119,7 +119,7 @@ pub(crate) fn is_host_specific_absolute_path(value: &str) -> bool {
     if starts_with_serialized_escape_prefix(value) {
         return false;
     }
-    Path::new(value).is_absolute()
+    is_posix_absolute_path_like(value)
         || is_file_url_absolute_path_like(value)
         || is_windows_absolute_path_like(value)
 }
@@ -130,6 +130,29 @@ fn starts_with_serialized_escape_prefix(value: &str) -> bool {
         && bytes[0] == b'\\'
         && bytes[1] == b'\\'
         && matches!(bytes[2], b'n' | b'r' | b't' | b'u' | b'"' | b'\'' | b'\\')
+}
+
+fn is_posix_absolute_path_like(value: &str) -> bool {
+    if !Path::new(value).is_absolute() {
+        return false;
+    }
+
+    let Some(first_component) = value
+        .trim_start_matches('/')
+        .split('/')
+        .find(|component| !component.is_empty())
+    else {
+        return false;
+    };
+
+    let mut chars = first_component.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
 }
 
 fn is_file_url_absolute_path_like(value: &str) -> bool {
@@ -161,7 +184,35 @@ fn is_windows_unc_absolute_path_like(value: &str) -> bool {
     let mut components = rest
         .split(['\\', '/'])
         .filter(|component| !component.is_empty());
-    components.next().is_some() && components.next().is_some()
+    let Some(server) = components.next() else {
+        return false;
+    };
+    let Some(share) = components.next() else {
+        return false;
+    };
+    plausible_unc_component(server, true) && plausible_unc_component(share, false)
+}
+
+fn plausible_unc_component(component: &str, is_server: bool) -> bool {
+    let mut chars = component.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if is_server {
+        if !first.is_ascii_alphanumeric() {
+            return false;
+        }
+        if !component.chars().any(|ch| ch.is_ascii_alphabetic() || ch == '.') {
+            return false;
+        }
+    } else if !first.is_ascii_alphanumeric() && first != '$' {
+        return false;
+    }
+
+    chars.all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || matches!(ch, '.' | '-' | '_' | '$' | ' ')
+    })
 }
 
 pub(crate) fn validate_report_text_has_no_raw_logs(

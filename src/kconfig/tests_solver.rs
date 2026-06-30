@@ -252,6 +252,73 @@ fn test_rewrite_dead_kconfig_symbol_definitions_requires_solver_proof() {
 }
 
 #[test]
+fn test_dead_kconfig_symbol_proofs_follow_explicit_live_arch_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    std::fs::write(
+        root.join("Kconfig"),
+        concat!(
+            "config ARCH_USED\n",
+            "\tbool \"Arch used\"\n",
+            "\tdepends on REMOVED_GATE\n",
+        ),
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("arch/x86")).unwrap();
+    std::fs::create_dir_all(root.join("arch/arm64")).unwrap();
+    std::fs::write(
+        root.join("arch/x86/Kconfig"),
+        concat!(
+            "config X86_PLATFORM\n",
+            "\tbool \"x86 platform\"\n",
+            "\tselect ARCH_USED\n",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("arch/arm64/Kconfig"),
+        concat!(
+            "config ARM64_PLATFORM\n",
+            "\tbool \"arm64 platform\"\n",
+        ),
+    )
+    .unwrap();
+
+    let selected = selected_profile_values(&[
+        ("ARCH_USED", "n"),
+        ("ARM64_PLATFORM", "n"),
+        ("X86_PLATFORM", "n"),
+    ]);
+    let removed = [String::from("REMOVED_GATE")];
+    let default_proofs =
+        prove_dead_kconfig_symbol_definitions(root, &selected, &removed).unwrap();
+    assert!(default_proofs.is_empty());
+
+    let arm64_only = crate::config::ArchPolicyConfig {
+        primary_arch: Some(String::from("arm64")),
+        ..crate::config::ArchPolicyConfig::default()
+    };
+    let arm64_only_proofs = prove_dead_kconfig_symbol_definitions_for_arch_policy(
+        root,
+        &selected,
+        &removed,
+        &arm64_only,
+    )
+    .unwrap();
+
+    assert_eq!(
+        arm64_only_proofs,
+        vec![KconfigDeadSymbolDefinitionProof {
+            file: PathBuf::from("Kconfig"),
+            symbol: String::from("ARCH_USED"),
+            definition_kind: KconfigSymbolDefinitionKind::Config,
+            start_line: 1,
+            end_line: 3,
+        }]
+    );
+}
+
+#[test]
 fn test_rewrite_empty_kconfig_menus_requires_solver_cleanup_proof() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

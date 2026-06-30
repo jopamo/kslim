@@ -34,8 +34,10 @@ pub(crate) use ast::{
     KconfigSymbolDefinition, KconfigSymbolDefinitionGroup, KconfigSymbolDefinitionKind,
     KconfigTypeConsistencyDefinition, KconfigTypeConsistencyViolation, KconfigTypeDefinition,
 };
+#[allow(unused_imports)]
 pub(crate) use report::{
-    kconfig_solver_report, read_kconfig_selected_profile_values,
+    kconfig_solver_report, kconfig_solver_report_for_arch_policy,
+    read_kconfig_selected_profile_values,
     KconfigRelationRewriteStats, KconfigReportCounts, KconfigSolverDeadSymbolDefinitionProof,
     KconfigSolverDefaultReenabledSymbol, KconfigSolverEmptyMenu, KconfigSolverImpossibleChoice,
     KconfigSolverOrphanedSymbolDefinition, KconfigSolverReport, KconfigSolverReverseDependency,
@@ -136,9 +138,24 @@ pub(crate) fn prove_dead_kconfig_symbol_definitions(
     selected_profile_values: &BTreeMap<String, String>,
     removed_configs: &[String],
 ) -> Result<Vec<KconfigDeadSymbolDefinitionProof>> {
+    prove_dead_kconfig_symbol_definitions_for_arch_policy(
+        root,
+        selected_profile_values,
+        removed_configs,
+        &crate::config::ArchPolicyConfig::default(),
+    )
+}
+
+#[allow(dead_code)]
+pub(crate) fn prove_dead_kconfig_symbol_definitions_for_arch_policy(
+    root: &Path,
+    selected_profile_values: &BTreeMap<String, String>,
+    removed_configs: &[String],
+    arch_policy: &crate::config::ArchPolicyConfig,
+) -> Result<Vec<KconfigDeadSymbolDefinitionProof>> {
     let selected_profile_values = parse_selected_profile_tristate_values(selected_profile_values)?;
     let removed_symbols: HashSet<&str> = removed_configs.iter().map(String::as_str).collect();
-    let live_arch_symbol_usage = kconfig_live_arch_symbol_usage(root)?;
+    let live_arch_symbol_usage = kconfig_live_arch_symbol_usage(root, arch_policy)?;
     let mut proofs = Vec::new();
 
     for path in kconfig_files(root) {
@@ -219,11 +236,15 @@ pub(crate) fn prove_empty_kconfig_menus(
 }
 
 
-fn kconfig_live_arch_symbol_usage(root: &Path) -> Result<KconfigLiveArchSymbolUsage> {
+fn kconfig_live_arch_symbol_usage(
+    root: &Path,
+    arch_policy: &crate::config::ArchPolicyConfig,
+) -> Result<KconfigLiveArchSymbolUsage> {
+    let live_arches = kconfig_live_arch_names(root, arch_policy)?;
     let mut usage = KconfigLiveArchSymbolUsage::default();
     for path in kconfig_files(root) {
         let relative = relative_to_root_path(root, &path);
-        if !kconfig_path_is_live_arch_kconfig(&relative) {
+        if !kconfig_path_is_live_arch_kconfig(&relative, live_arches.as_ref()) {
             continue;
         }
 
@@ -234,11 +255,101 @@ fn kconfig_live_arch_symbol_usage(root: &Path) -> Result<KconfigLiveArchSymbolUs
     Ok(usage)
 }
 
-fn kconfig_path_is_live_arch_kconfig(relative: &Path) -> bool {
+fn kconfig_live_arch_names(
+    root: &Path,
+    arch_policy: &crate::config::ArchPolicyConfig,
+) -> Result<Option<BTreeSet<String>>> {
+    let primary = arch_policy
+        .primary_arch
+        .as_deref()
+        .map(crate::config::normalize_arch_name)
+        .transpose()?;
+    let mut explicit_live = arch_policy
+        .secondary_arches
+        .iter()
+        .map(|arch| crate::config::normalize_arch_name(arch))
+        .collect::<Result<BTreeSet<_>>>()?;
+    let disabled = arch_policy
+        .disabled_arches
+        .iter()
+        .map(|arch| crate::config::normalize_arch_name(arch))
+        .collect::<Result<BTreeSet<_>>>()?;
+
+    if let Some(primary) = primary {
+        explicit_live.insert(primary);
+    }
+    if !explicit_live.is_empty() {
+        ensure_live_arches_exist(root, &explicit_live)?;
+        return Ok(Some(explicit_live));
+    }
+    if disabled.is_empty() {
+        return Ok(None);
+    }
+
+    let live_arches = kernel_tree_arch_names(root)?
+        .into_iter()
+        .filter(|arch| !disabled.contains(arch))
+        .collect::<BTreeSet<_>>();
+    if live_arches.is_empty() {
+        anyhow::bail!(
+            "arch policy disabled every architecture under '{}'; declare at least one live arch",
+            root.join("arch").display()
+        );
+    }
+    Ok(Some(live_arches))
+}
+
+fn ensure_live_arches_exist(root: &Path, live_arches: &BTreeSet<String>) -> Result<()> {
+    let tree_arches = kernel_tree_arch_names(root)?;
+    for arch in live_arches {
+        if tree_arches.contains(arch) {
+            continue;
+        }
+        if matches!(arch.as_str(), "amd64" | "x86_64") && tree_arches.contains("x86") {
+            anyhow::bail!(
+                "arch policy selects '{}' but the kernel source tree uses arch/x86 for amd64/x86_64 builds; use 'x86'",
+                arch
+            );
+        }
+        anyhow::bail!(
+            "arch policy selects '{}' but '{}' does not exist",
+            arch,
+            root.join("arch").join(arch).display()
+        );
+    }
+    Ok(())
+}
+
+fn kernel_tree_arch_names(root: &Path) -> Result<BTreeSet<String>> {
+    let arch_root = root.join("arch");
+    let mut arches = BTreeSet::new();
+    if !arch_root.is_dir() {
+        return Ok(arches);
+    }
+    for entry in std::fs::read_dir(&arch_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if let Some(name) = entry.file_name().to_str() {
+            arches.insert(name.to_string());
+        }
+    }
+    Ok(arches)
+}
+
+fn kconfig_path_is_live_arch_kconfig(
+    relative: &Path,
+    live_arches: Option<&BTreeSet<String>>,
+) -> bool {
     let mut components = relative.components();
     matches!(
         (components.next(), components.next()),
-        (Some(Component::Normal(root)), Some(Component::Normal(_))) if root == "arch"
+        (Some(Component::Normal(root)), Some(Component::Normal(arch)))
+            if root == "arch"
+                && live_arches
+                    .map(|arches| arches.contains(arch.to_string_lossy().as_ref()))
+                    .unwrap_or(true)
     )
 }
 

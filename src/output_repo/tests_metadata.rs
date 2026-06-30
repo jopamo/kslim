@@ -104,6 +104,14 @@ fn test_host_specific_path_detection_covers_local_url_and_windows_forms() {
     assert!(!is_host_specific_absolute_path(
         "\\\\n\\t-I$(FULL_AMD_PATH)/include"
     ));
+    assert!(!is_host_specific_absolute_path(
+        "\\\\(.*\\\\)/\\\\1/p"
+    ));
+    assert!(!is_host_specific_absolute_path(
+        "\\\\2\\\\n.set"
+    ));
+    assert!(!is_host_specific_absolute_path("/2."));
+    assert!(!is_host_specific_absolute_path("/.global"));
 }
 
 #[test]
@@ -123,6 +131,31 @@ fn test_host_specific_path_marker_ignores_serialized_line_continuation_include_f
         "logical_item = \"ccflags-y := -I$(FULL_AMD_PATH)/include/asic_reg \\\\\\n",
         "\\t-I$(FULL_AMD_PATH)/include \\\\\\n",
         "\\t-I$(FULL_AMD_PATH)/amdgpu\\n\"\n",
+    );
+
+    assert_eq!(
+        crate::security::find_host_specific_absolute_path_marker(contents),
+        None
+    );
+}
+
+#[test]
+fn test_host_specific_path_marker_ignores_serialized_sed_backreference_pattern() {
+    let contents = concat!(
+        "logical_item = \"bad_syms=$$($(NM) $@ | sed -n ",
+        "'s/^.\\\\{8\\\\} [bc] \\\\(.*\\\\)/\\\\1/p')\\n\"\n",
+    );
+
+    assert_eq!(
+        crate::security::find_host_specific_absolute_path_marker(contents),
+        None
+    );
+}
+
+#[test]
+fn test_host_specific_path_marker_ignores_serialized_shell_backreference_newline_pattern() {
+    let contents = concat!(
+        "logical_item = \"sed 's!x!.global \\\\2\\\\n.set \\\\2,0x\\\\1!'\\n\"\n",
     );
 
     assert_eq!(

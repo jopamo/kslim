@@ -178,10 +178,25 @@ pub(crate) fn read_kconfig_selected_profile_values(
     Ok(values)
 }
 
+#[allow(dead_code)]
 pub(crate) fn kconfig_solver_report(
     root: &Path,
     selected_profile_values: &BTreeMap<String, String>,
     removed_configs: &[String],
+) -> Result<KconfigSolverReport> {
+    kconfig_solver_report_for_arch_policy(
+        root,
+        selected_profile_values,
+        removed_configs,
+        &crate::config::ArchPolicyConfig::default(),
+    )
+}
+
+pub(crate) fn kconfig_solver_report_for_arch_policy(
+    root: &Path,
+    selected_profile_values: &BTreeMap<String, String>,
+    removed_configs: &[String],
+    arch_policy: &crate::config::ArchPolicyConfig,
 ) -> Result<KconfigSolverReport> {
     let selected_profile_values = parse_selected_profile_tristate_values(selected_profile_values)?;
     let removed_symbols: HashSet<&str> = removed_configs.iter().map(String::as_str).collect();
@@ -222,10 +237,11 @@ pub(crate) fn kconfig_solver_report(
 
     let selected_profile_values_for_proofs =
         selected_profile_values_as_strings(&selected_profile_values);
-    match prove_dead_kconfig_symbol_definitions(
+    match prove_dead_kconfig_symbol_definitions_for_arch_policy(
         root,
         &selected_profile_values_for_proofs,
         removed_configs,
+        arch_policy,
     ) {
         Ok(proofs) => {
             report.dead_symbol_definition_proofs.extend(

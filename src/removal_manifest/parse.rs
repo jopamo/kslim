@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::abi::AbiPolicyConfig;
-use crate::config::{FeaturePreservationInput, SlimConfig};
+use crate::config::{ArchPolicyConfig, FeaturePreservationInput, SlimConfig};
 use crate::generated::normalize_generated_include_roots;
 use crate::model::KconfigSymbol;
 use crate::path_policy::{normalized_relative_path_covers, path_is_normalized_tree_root};
@@ -283,6 +283,7 @@ impl RemovalManifest {
             removed_exported_symbols,
             removed_runtime_registrations,
             abi_policy: abi_policy.clone(),
+            arch_policy: ArchPolicyConfig::default(),
             unsafe_allow_root_path_removal: slim.unsafe_allow_root_path_removal,
             preserved_paths,
             preserved_config_symbols,

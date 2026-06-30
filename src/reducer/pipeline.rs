@@ -51,12 +51,13 @@ pub fn run_reducer_for_profile(
     let preservation_input = profile.effective_preservation_input();
     let abi_policy = profile.effective_abi_policy();
 
-    let result = run_reducer_with_abi_policy_and_preservation(
+    let result = run_reducer_with_policies_and_preservation(
         root,
         &removal_input,
         preservation_input.as_ref(),
         &profile.reducer,
         &abi_policy,
+        &profile.arch,
     )?;
     super::ensure_supported_fallout(&result.stats, &profile.reducer)?;
     Ok(result)
@@ -98,8 +99,27 @@ pub fn run_reducer_with_abi_policy_and_preservation(
     reducer_config: &crate::config::ReducerConfig,
     abi_policy: &crate::config::AbiPolicyConfig,
 ) -> Result<ReducerResult> {
+    run_reducer_with_policies_and_preservation(
+        root,
+        slim_config,
+        preservation,
+        reducer_config,
+        abi_policy,
+        &crate::config::ArchPolicyConfig::default(),
+    )
+}
+
+pub fn run_reducer_with_policies_and_preservation(
+    root: &KernelSourceRoot,
+    slim_config: &crate::config::SlimConfig,
+    preservation: Option<&crate::config::FeaturePreservationInput>,
+    reducer_config: &crate::config::ReducerConfig,
+    abi_policy: &crate::config::AbiPolicyConfig,
+    arch_policy: &crate::config::ArchPolicyConfig,
+) -> Result<ReducerResult> {
     log_reducer_stage(ReducerStage::BuildManifest);
-    let manifest = build_removal_manifest(root, slim_config, preservation, abi_policy)?;
+    let manifest =
+        build_removal_manifest(root, slim_config, preservation, abi_policy, arch_policy)?;
     if manifest.is_noop() {
         return Ok(ReducerResult::default());
     }
@@ -361,13 +381,16 @@ fn build_removal_manifest(
     slim_config: &crate::config::SlimConfig,
     preservation: Option<&crate::config::FeaturePreservationInput>,
     abi_policy: &crate::config::AbiPolicyConfig,
+    arch_policy: &crate::config::ArchPolicyConfig,
 ) -> Result<RemovalManifest> {
-    RemovalManifest::from_slim_config_for_tree_with_abi_policy_and_preservation(
+    let mut manifest = RemovalManifest::from_slim_config_for_tree_with_abi_policy_and_preservation(
         root.as_path(),
         slim_config,
         preservation,
         abi_policy,
-    )
+    )?;
+    manifest.arch_policy = arch_policy.clone();
+    Ok(manifest)
 }
 
 fn build_initial_tree_index(

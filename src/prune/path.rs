@@ -544,6 +544,32 @@ fn remove_path(
         ));
 
         Ok((file_count, dir_count))
+    } else if meta.file_type().is_symlink() {
+        let before = std::fs::read_link(path)
+            .map(|target| format!("<symlink -> {}>", target.display()))
+            .unwrap_or_else(|_| String::from("<symlink>"));
+        if let Err(err) = std::fs::remove_file(path) {
+            let kind = failed_removal_kind_from_io_error(&err);
+            record_failed_removal(failed, relative, kind, err.to_string(), policy)?;
+            return Ok((0, 0));
+        }
+        removed.push(RemovedArtifact {
+            relative: relative.clone(),
+            is_dir: false,
+        });
+        removal.removed_files.push(relative.clone());
+        edits.push(EditRecord::new(
+            relative,
+            None,
+            before,
+            String::new(),
+            EditReason::ManifestPath {
+                path: manifest_path.to_path_buf(),
+            },
+            EditProofSource::removal_manifest_path(manifest_path.to_path_buf()),
+            "prune.remove_path",
+        ));
+        Ok((1, 0))
     } else if meta.file_type().is_file() {
         for symbol in crate::kconfig::defined_symbols_in_file(path)? {
             if !removal.removed_config_symbols.contains(&symbol) {

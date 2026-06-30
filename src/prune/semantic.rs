@@ -38,10 +38,11 @@ pub(crate) fn rewrite_kconfig_stage(
     let kconfig_solver_report = if removed_config_symbols.is_empty() {
         KconfigSolverReport::default()
     } else {
-        crate::kconfig::kconfig_solver_report(
+        crate::kconfig::kconfig_solver_report_for_arch_policy(
             root,
             &selected_profile_values,
             &removed_config_symbols,
+            &manifest.arch_policy,
         )?
     };
 

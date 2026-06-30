@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crate::abi::AbiPolicyConfig;
+use crate::config::ArchPolicyConfig;
 use crate::hardware::DeviceBindingRemovalProof;
 use crate::exported_symbols::ExportedSymbolRemovalProof;
 use crate::model::{HeaderPath, KbuildObject};
@@ -50,6 +51,7 @@ pub struct RemovalManifest {
     pub(crate) removed_exported_symbols: BTreeSet<ExportedSymbolRemovalProof>,
     pub(crate) removed_runtime_registrations: BTreeSet<RuntimeRegistrationRemovalProof>,
     pub abi_policy: AbiPolicyConfig,
+    pub arch_policy: ArchPolicyConfig,
     pub unsafe_allow_root_path_removal: bool,
     pub preserved_paths: BTreeSet<RelativePathBuf>,
     pub preserved_config_symbols: BTreeSet<String>,
