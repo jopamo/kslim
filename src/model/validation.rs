@@ -29,6 +29,22 @@ pub(super) fn is_c_identifier(value: &str) -> bool {
     is_c_identifier_start(first) && chars.all(is_c_identifier_continue)
 }
 
+pub(super) fn is_exported_symbol_start(ch: char) -> bool {
+    is_c_identifier_start(ch) || ch == '$'
+}
+
+pub(super) fn is_exported_symbol_continue(ch: char) -> bool {
+    is_exported_symbol_start(ch) || ch.is_ascii_digit()
+}
+
+pub(super) fn is_exported_symbol(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_exported_symbol_start(first) && chars.all(is_exported_symbol_continue)
+}
+
 pub(super) fn is_module_name_start(ch: char) -> bool {
     ch == '_' || ch.is_ascii_alphanumeric()
 }

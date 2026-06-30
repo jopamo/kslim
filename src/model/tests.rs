@@ -65,6 +65,8 @@ fn test_exported_symbol_accepts_c_identifiers() {
             .as_str(),
         "__tracepoint_sched_switch"
     );
+    assert_eq!(ExportedSymbol::new("$global$").unwrap().as_str(), "$global$");
+    assert_eq!(ExportedSymbol::new("$$divI").unwrap().as_str(), "$$divI");
 }
 
 #[test]

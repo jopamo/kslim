@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 
 use super::validation::{
-    is_c_identifier, is_c_identifier_continue, is_c_identifier_start, non_empty_model_value,
+    is_c_identifier, is_c_identifier_continue, is_c_identifier_start, is_exported_symbol,
+    non_empty_model_value,
 };
 
 #[allow(dead_code)]
@@ -17,11 +18,7 @@ pub struct ExportedSymbol(String);
 impl ExportedSymbol {
     pub fn new(symbol: impl Into<String>) -> Result<Self> {
         let symbol = non_empty_model_value("exported symbol", symbol)?;
-        let mut chars = symbol.chars();
-        let Some(first) = chars.next() else {
-            anyhow::bail!("exported symbol must not be empty");
-        };
-        if !is_c_identifier_start(first) || !chars.all(is_c_identifier_continue) {
+        if !is_exported_symbol(&symbol) {
             anyhow::bail!("exported symbol contains invalid characters: {}", symbol);
         }
         Ok(Self(symbol))
