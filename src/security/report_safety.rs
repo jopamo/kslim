@@ -57,10 +57,42 @@ pub(crate) fn validate_report_text_has_no_host_absolute_paths(
 }
 
 pub(crate) fn find_host_specific_absolute_path_marker(contents: &str) -> Option<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(contents) {
+        return host_path_marker_from_json(&value);
+    }
+    if let Ok(value) = toml::from_str::<toml::Value>(contents) {
+        return host_path_marker_from_toml(&value);
+    }
+    host_path_marker_from_text(contents)
+}
+
+fn host_path_marker_from_text(contents: &str) -> Option<String> {
     contents
         .split(is_host_path_token_boundary)
         .filter_map(host_path_marker_from_token)
         .next()
+}
+
+fn host_path_marker_from_json(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => object.iter().find_map(|(key, value)| {
+            host_path_marker_from_text(key).or_else(|| host_path_marker_from_json(value))
+        }),
+        serde_json::Value::Array(values) => values.iter().find_map(host_path_marker_from_json),
+        serde_json::Value::String(value) => host_path_marker_from_text(value),
+        _ => None,
+    }
+}
+
+fn host_path_marker_from_toml(value: &toml::Value) -> Option<String> {
+    match value {
+        toml::Value::Table(table) => table.iter().find_map(|(key, value)| {
+            host_path_marker_from_text(key).or_else(|| host_path_marker_from_toml(value))
+        }),
+        toml::Value::Array(values) => values.iter().find_map(host_path_marker_from_toml),
+        toml::Value::String(value) => host_path_marker_from_text(value),
+        _ => None,
+    }
 }
 
 fn host_path_marker_from_token(token: &str) -> Option<String> {

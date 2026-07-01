@@ -555,71 +555,7 @@ pub(crate) fn sanitize_committed_result_text(value: &str) -> String {
 }
 
 fn contains_host_specific_absolute_path(value: &str) -> bool {
-    if host_path_token(value) {
-        return true;
-    }
-
-    value
-        .split(|ch: char| ch.is_whitespace() || matches!(ch, '"' | '\'' | ',' | ';'))
-        .any(host_path_token)
-}
-
-fn host_path_token(token: &str) -> bool {
-    let token = trim_path_candidate(token);
-    if token.is_empty() {
-        return false;
-    }
-    if is_host_specific_absolute_path_like(token) {
-        return true;
-    }
-    if let Some((_, value)) = token.rsplit_once('=') {
-        if is_host_specific_absolute_path_like(trim_path_candidate(value)) {
-            return true;
-        }
-    }
-    if let Some(file_url) = token.find("file:").map(|index| &token[index..]) {
-        if is_host_specific_absolute_path_like(file_url) {
-            return true;
-        }
-    }
-    if !token.contains("://") {
-        if let Some((_, value)) = token.rsplit_once(':') {
-            if is_host_specific_absolute_path_like(trim_path_candidate(value)) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn trim_path_candidate(value: &str) -> &str {
-    value.trim_matches(|ch: char| {
-        matches!(
-            ch,
-            '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>' | ',' | ';'
-        )
-    })
-}
-
-fn is_host_specific_absolute_path_like(value: &str) -> bool {
-    let value = value.trim();
-    if value.is_empty() {
-        return false;
-    }
-    Path::new(value).is_absolute()
-        || value.starts_with("file:")
-        || is_windows_absolute_path_like(value)
-}
-
-fn is_windows_absolute_path_like(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    if value.starts_with("\\\\") {
-        return true;
-    }
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    crate::security::find_host_specific_absolute_path_marker(value).is_some()
 }
 
 fn fixup_applications_from_stats(stats: &ReducerStats) -> Vec<FixupApplication> {
@@ -771,5 +707,23 @@ mod tests {
         assert_eq!(result.stats.applied_fixups[0].edits, vec![edit_a, edit_z]);
         assert_eq!(result.edit_summary.total_edits, 2);
         assert_eq!(result.passes[0].edit_count, 2);
+    }
+
+    #[test]
+    fn sanitize_committed_result_text_preserves_serialized_sed_backreference_patterns() {
+        let value = "bad_syms=$$($(NM) $@ | sed -n 's/^.\\{8\\} [bc] \\(.*\\)/\\1/p')\n";
+        assert_eq!(sanitize_committed_result_text(value), value);
+    }
+
+    #[test]
+    fn sanitize_committed_result_text_preserves_serialized_shell_backreference_newline_patterns() {
+        let value = "sed 's!x!.global \\2\\n.set \\2,0x\\1!'\n";
+        assert_eq!(sanitize_committed_result_text(value), value);
+    }
+
+    #[test]
+    fn sanitize_committed_result_text_preserves_prose_math_fragments() {
+        let value = "cosh(X) = sign(X) * exp(|X|)/2.\n";
+        assert_eq!(sanitize_committed_result_text(value), value);
     }
 }

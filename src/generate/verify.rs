@@ -322,7 +322,10 @@ mod tests {
         std::fs::write(root.join("Kconfig"), "# test\n").unwrap();
     }
 
-    fn requested_state(config_path: &Path) -> RequestedGenerateState {
+    fn requested_state_with_run_selftests(
+        config_path: &Path,
+        run_selftests: bool,
+    ) -> RequestedGenerateState {
         RequestedGenerateState::new(
             RequestedConfigPath::new(config_path).unwrap(),
             ProfileName::new("default").unwrap(),
@@ -344,9 +347,13 @@ mod tests {
                 matrix: None,
                 strict: false,
                 no_strict: false,
-                run_selftests: false,
+                run_selftests,
             },
         )
+    }
+
+    fn requested_state(config_path: &Path) -> RequestedGenerateState {
+        requested_state_with_run_selftests(config_path, true)
     }
 
     fn plan_for_profile(
@@ -392,6 +399,31 @@ mod tests {
         let mut profile = config::default_profile_config("v1.0");
         profile.selftests.enabled = false;
         plan_for_profile(config_path, output, profile)
+    }
+
+    fn cli_selftests_disabled_plan_for_tree(config_path: &Path, output: &Path) -> GeneratePlan {
+        let config = config::default_kslim_config("demo", output.to_str().unwrap());
+        let profile = config::default_profile_config("v1.0");
+        let resolved = ResolvedCandidateState::from_resolved_inputs(
+            &config,
+            &profile,
+            ResolvedBase {
+                upstream: config.upstream.name.clone(),
+                url: config.upstream.url.clone(),
+                r#ref: String::from("v1.0"),
+                commit: String::from("deadbeef"),
+                resolved_at: String::from("2026-01-01T00:00:00Z"),
+            },
+            None,
+            "unmodified-upstream",
+            "kslim/v1.0/default",
+        )
+        .unwrap();
+        GeneratePlan::new(
+            requested_state_with_run_selftests(config_path, false),
+            resolved,
+        )
+        .unwrap()
     }
 
     fn write_candidate_metadata_for_test(
@@ -1006,6 +1038,25 @@ mod tests {
         let metadata_dir = tree.join(".kslim");
         std::fs::create_dir_all(&metadata_dir).unwrap();
         let plan = selftests_disabled_plan_for_tree(&config_path, &output);
+        let candidate = CandidateTreeState::from_materialized_tree(&tree).unwrap();
+        write_candidate_metadata_for_test(&metadata_dir, &plan, &candidate, false);
+
+        let verification = verify_candidate(&plan, &candidate).unwrap();
+
+        assert!(verification.selftest_ok());
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn test_verify_candidate_accepts_missing_selftest_when_disabled_by_cli_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tree = tmp.path().join("candidate");
+        let output = tmp.path().join("output");
+        let config_path = tmp.path().join("project/kslim.toml");
+        create_minimal_tree(&tree);
+        let metadata_dir = tree.join(".kslim");
+        std::fs::create_dir_all(&metadata_dir).unwrap();
+        let plan = cli_selftests_disabled_plan_for_tree(&config_path, &output);
         let candidate = CandidateTreeState::from_materialized_tree(&tree).unwrap();
         write_candidate_metadata_for_test(&metadata_dir, &plan, &candidate, false);
 

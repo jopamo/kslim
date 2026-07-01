@@ -217,7 +217,9 @@ pub(super) fn verify_selftest_policy(
     candidate: &CandidateTreeState,
     metadata: &CandidateMetadataSummary,
 ) -> Result<bool> {
-    if !plan.resolved.selftest_plan.enabled {
+    let selftests_required =
+        plan.resolved.selftest_plan.enabled && plan.requested.cli_overrides.run_selftests;
+    if !selftests_required {
         if candidate.selftested && !metadata.selftested {
             anyhow::bail!(
                 "verification failed: candidate state records selftests but candidate metadata does not"

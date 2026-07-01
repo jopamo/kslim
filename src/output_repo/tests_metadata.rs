@@ -165,6 +165,32 @@ fn test_host_specific_path_marker_ignores_serialized_shell_backreference_newline
 }
 
 #[test]
+fn test_host_specific_path_marker_ignores_serialized_assembly_macro_text_in_json() {
+    let contents = serde_json::json!({
+        "logical_item": "\\func\n.endm\n\n/*\n"
+    })
+    .to_string();
+
+    assert_eq!(
+        crate::security::find_host_specific_absolute_path_marker(&contents),
+        None
+    );
+}
+
+#[test]
+fn test_host_specific_path_marker_detects_json_string_values_after_unescaping() {
+    let contents = serde_json::json!({
+        "logical_item": "prefix /tmp/linux.git suffix"
+    })
+    .to_string();
+
+    assert_eq!(
+        crate::security::find_host_specific_absolute_path_marker(&contents),
+        Some(String::from("/tmp/linux.git"))
+    );
+}
+
+#[test]
 fn test_generated_metadata_requires_reproducible_timestamp() {
     let tmp = tempfile::tempdir().unwrap();
     let output = tmp.path().join("output");
