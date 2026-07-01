@@ -730,6 +730,16 @@ pub(crate) fn defined_symbols_in_file(path: &Path) -> Result<Vec<String>> {
     Ok(symbols)
 }
 
+pub(crate) fn defined_symbols_in_tree(root: &Path) -> Result<HashSet<String>> {
+    let mut symbols = HashSet::new();
+    for path in kconfig_files(root) {
+        for symbol in defined_symbols_in_file(&path)? {
+            symbols.insert(symbol);
+        }
+    }
+    Ok(symbols)
+}
+
 
 fn parse_config_symbol(line: &str) -> Option<String> {
     match parse_kconfig_directive(line)? {

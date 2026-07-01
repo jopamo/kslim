@@ -177,6 +177,10 @@ pub(crate) fn prune_declared_paths_from_manifest_with_policy(
     let preserved_paths = manifest.preserved_paths_vec();
     let mut declared =
         prune_declared_paths_with_preservation(root, &removed_paths, &preserved_paths, policy)?;
+    filter_removed_config_symbols_with_surviving_live_definitions(
+        root,
+        &mut declared.removal.removed_config_symbols,
+    )?;
     for symbol in &effective_removed_config_symbols {
         if !declared.removal.removed_config_symbols.contains(symbol) {
             declared.removal.removed_config_symbols.push(symbol.clone());
@@ -184,6 +188,18 @@ pub(crate) fn prune_declared_paths_from_manifest_with_policy(
     }
     declared.removal.normalize_and_sort_lists();
     Ok(declared)
+}
+
+fn filter_removed_config_symbols_with_surviving_live_definitions(
+    root: &Path,
+    removed_config_symbols: &mut Vec<String>,
+) -> Result<()> {
+    if removed_config_symbols.is_empty() {
+        return Ok(());
+    }
+    let live_symbols = crate::kconfig::defined_symbols_in_tree(root)?;
+    removed_config_symbols.retain(|symbol| !live_symbols.contains(symbol));
+    Ok(())
 }
 
 

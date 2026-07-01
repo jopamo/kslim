@@ -1557,6 +1557,39 @@ source "drivers/gpu/drm/amd/display/Kconfig"
     }
 
     #[test]
+    fn test_prune_keeps_symbols_with_surviving_live_kconfig_definitions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("drivers/foo")).unwrap();
+        std::fs::create_dir_all(root.join("drivers/bar")).unwrap();
+        std::fs::write(
+            root.join("drivers/foo/Kconfig"),
+            "config SHARED_SYMBOL\n\tbool \"Shared from foo\"\nconfig REMOVED_ONLY\n\tbool \"Removed only\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("drivers/bar/Kconfig"),
+            "config SHARED_SYMBOL\n\tbool \"Shared from bar\"\n",
+        )
+        .unwrap();
+
+        let slim = SlimConfig {
+            remove_paths: vec!["drivers/foo/Kconfig".to_string()],
+            remove_configs: vec![],
+            set_defaults: BTreeMap::new(),
+            unsafe_allow_root_path_removal: false,
+        };
+
+        let stats = prune_tree(root.to_str().unwrap(), &slim).unwrap();
+
+        assert_eq!(
+            stats.removal.removed_config_symbols,
+            vec![String::from("REMOVED_ONLY")]
+        );
+    }
+
+    #[test]
     fn test_prune_rewrites_stale_ccflags_include_paths_after_dir_removal() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
