@@ -25,6 +25,7 @@ use crate::paths::{
 };
 
 pub const COMMITTED_METADATA_DIR: &str = ".kslim";
+pub const MANAGED_METADATA_FILE: &str = "managed.toml";
 pub(super) const CANDIDATE_METADATA_FILE: &str = "candidate.toml";
 pub const BASE_METADATA_FILE: &str = "base.toml";
 pub const GENERATED_METADATA_FILE: &str = "generated.toml";
@@ -142,6 +143,18 @@ fn metadata_dir_path(output_path: &Path) -> PathBuf {
     } else {
         output_path.join(".kslim")
     }
+}
+
+pub(crate) fn committed_candidate_metadata_file_names() -> &'static [&'static str] {
+    &[
+        MANAGED_METADATA_FILE,
+        BASE_METADATA_FILE,
+        GENERATED_METADATA_FILE,
+        PATCH_METADATA_FILE,
+        crate::manifest::OUTPUT_MANIFEST_FILE_NAME,
+        REPORT_FILE,
+        CANDIDATE_METADATA_FILE,
+    ]
 }
 
 #[allow(dead_code)]
@@ -721,7 +734,7 @@ fn committed_metadata_ref(file_name: &str) -> Result<String> {
 pub(super) fn validate_candidate_metadata(candidate_root: &Path) -> Result<()> {
     let candidate_metadata = metadata_dir_path(candidate_root);
     for required in [
-        "managed.toml",
+        MANAGED_METADATA_FILE,
         BASE_METADATA_FILE,
         GENERATED_METADATA_FILE,
         crate::manifest::OUTPUT_MANIFEST_FILE_NAME,

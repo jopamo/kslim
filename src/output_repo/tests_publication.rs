@@ -71,6 +71,16 @@ fn test_publish_output_candidate_syncs_payload_and_non_published_metadata_togeth
         "report\n",
     )
     .unwrap();
+    std::fs::write(
+        candidate.join(format!(".kslim/{}", REDUCER_REPORT_JSON)),
+        "{\"summary\":\"candidate\"}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        candidate.join(format!(".kslim/{}", REDUCER_EDIT_SUMMARY_JSON)),
+        "{\"edits\":[]}\n",
+    )
+    .unwrap();
 
     publish_output_candidate(
         &output_repo_path(&output),
@@ -85,6 +95,16 @@ fn test_publish_output_candidate_syncs_payload_and_non_published_metadata_togeth
     );
     assert!(output.join(".git/kslim/managed.toml").exists());
     assert!(output.join(".kslim/managed.toml").exists());
+    assert!(output.join(".git/kslim").join(REDUCER_REPORT_JSON).exists());
+    assert!(output
+        .join(".git/kslim")
+        .join(REDUCER_EDIT_SUMMARY_JSON)
+        .exists());
+    assert!(!output.join(".kslim").join(REDUCER_REPORT_JSON).exists());
+    assert!(!output
+        .join(".kslim")
+        .join(REDUCER_EDIT_SUMMARY_JSON)
+        .exists());
     assert!(!output
         .join(format!(".git/kslim/{}", PUBLISHED_SNAPSHOT_FILE))
         .exists());

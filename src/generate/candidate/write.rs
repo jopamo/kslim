@@ -21,6 +21,11 @@ use super::model::{
     MaterializedTree, WorkspacePaths,
 };
 
+struct CandidatePrunePreparation {
+    manifest: RemovalManifest,
+    declared_prune: Option<prune::DeclaredPathPruneResult>,
+}
+
 fn log_candidate_generate_stage(stage: GenerateStage, action: &str) {
     log::info!("generate: stage={} action={}", stage.as_str(), action);
 }
@@ -72,11 +77,16 @@ fn build_candidate_tree_inner(
         apply_patch_plan(plan, &mutation_target)?;
         apply_integration_plan(plan, &mutation_target)
     })?;
-    let declared_prune = record_candidate_stage(GenerateStage::Prune, || {
-        prune_candidate_paths(plan, &mutation_target)
+    let prune_preparation = record_candidate_stage(GenerateStage::Prune, || {
+        prepare_candidate_prune(plan, &mutation_target)
     })?;
-    let pruned = declared_prune.is_some();
-    let reducer_stats = run_candidate_reducer(plan, &mutation_target, declared_prune)?;
+    let pruned = prune_preparation.declared_prune.is_some();
+    let reducer_stats = run_candidate_reducer(
+        plan,
+        &mutation_target,
+        &prune_preparation.manifest,
+        prune_preparation.declared_prune,
+    )?;
     let reduced = reducer_stats.is_some();
 
     record_candidate_stage(GenerateStage::Metadata, || {
@@ -92,16 +102,12 @@ fn build_candidate_tree_inner(
             state.mark_reduced()?;
         }
         let reducer_config = reducer_config_from_plan(&plan.resolved.reducer_plan);
-        let removal_manifest = removal_manifest_from_prune_plan_for_tree(
-            mutation_target.as_path(),
-            &plan.resolved.prune_plan,
-        )?;
         write_candidate_metadata(
             plan,
             &state,
             reducer_stats.as_ref(),
             &reducer_config,
-            &removal_manifest,
+            &prune_preparation.manifest,
         )?;
         Ok(state)
     })
@@ -327,17 +333,20 @@ pub(super) fn apply_integration_plan(
     Ok(true)
 }
 
-fn prune_candidate_paths(
+fn prepare_candidate_prune(
     plan: &GeneratePlan,
     target: &CandidateMutationTarget,
-) -> Result<Option<prune::DeclaredPathPruneResult>> {
-    if plan.resolved.prune_plan.remove_paths.is_empty() {
-        return Ok(None);
-    }
-
-    log_candidate_generate_stage(GenerateStage::Prune, "prune_candidate_paths");
+) -> Result<CandidatePrunePreparation> {
     let tree_path = target.as_path();
     let manifest = removal_manifest_from_prune_plan_for_tree(tree_path, &plan.resolved.prune_plan)?;
+    if plan.resolved.prune_plan.remove_paths.is_empty() {
+        return Ok(CandidatePrunePreparation {
+            manifest,
+            declared_prune: None,
+        });
+    }
+
+    log_candidate_generate_stage(GenerateStage::Prune, "prepare_candidate_prune");
     let reducer_config = reducer_config_from_plan(&plan.resolved.reducer_plan);
     let policy = prune::RemovalFailurePolicy::from_reducer_config(&reducer_config);
     let result =
@@ -365,7 +374,10 @@ fn prune_candidate_paths(
         result.dirs_removed,
         result.removal.empty_parents_cleaned.len()
     );
-    Ok(Some(result))
+    Ok(CandidatePrunePreparation {
+        manifest,
+        declared_prune: Some(result),
+    })
 }
 
 fn removal_manifest_from_prune_plan_for_tree(
@@ -449,24 +461,14 @@ fn validate_candidate_edit_records(
 fn run_candidate_reducer(
     plan: &GeneratePlan,
     target: &CandidateMutationTarget,
+    manifest: &RemovalManifest,
     declared_prune: Option<prune::DeclaredPathPruneResult>,
 ) -> Result<Option<reducer::ReducerStats>> {
-    let slim = slim_config_from_prune_plan(&plan.resolved.prune_plan);
-    let preservation = preservation_input_from_prune_plan(&plan.resolved.prune_plan);
-    let kernel_root = target.kernel_source_root()?;
-    let tree_path = kernel_root.as_path();
-    let mut manifest = RemovalManifest::from_slim_config_for_tree_with_abi_policy_and_preservation(
-        tree_path,
-        &slim,
-        preservation.as_ref(),
-        &plan.resolved.prune_plan.abi_policy,
-    )
-    .with_context(|| CandidateBuildStageFailure::new(GenerateStage::Reduce))?;
-    manifest.arch_policy = plan.resolved.prune_plan.arch_policy.clone();
     if manifest.is_noop() {
         return Ok(None);
     }
 
+    let kernel_root = target.kernel_source_root()?;
     log_candidate_generate_stage(GenerateStage::Reduce, "run_candidate_reducer");
     let reducer_config = reducer_config_from_plan(&plan.resolved.reducer_plan);
     let result = match declared_prune {
@@ -476,13 +478,10 @@ fn run_candidate_reducer(
             declared_prune,
             &reducer_config,
         ),
-        None => reducer::run_reducer_with_policies_and_preservation(
+        None => reducer::run_reducer_from_manifest(
             &kernel_root,
-            &slim,
-            preservation.as_ref(),
+            manifest.clone(),
             &reducer_config,
-            &plan.resolved.prune_plan.abi_policy,
-            &plan.resolved.prune_plan.arch_policy,
         ),
     }
     .context("failed to run resolved candidate reducer")

@@ -153,6 +153,33 @@ pub(crate) fn run_reducer_after_declared_prune(
     finish_reducer_after_declared_prune(root, manifest, None, declared_prune, reducer_config)
 }
 
+pub(crate) fn run_reducer_from_manifest(
+    root: &KernelSourceRoot,
+    manifest: RemovalManifest,
+    reducer_config: &crate::config::ReducerConfig,
+) -> Result<ReducerResult> {
+    if manifest.is_noop() {
+        return Ok(ReducerResult::default());
+    }
+    log_reducer_stage(ReducerStage::BuildInitialIndex);
+    let initial_index = build_initial_tree_index(root, &manifest)?;
+    let declared_prune = crate::prune::DeclaredPathPruneResult {
+        files_removed: 0,
+        dirs_removed: 0,
+        removed_artifacts: Vec::new(),
+        removal: crate::prune::RemovalAccounting::default(),
+        edits: Vec::new(),
+        result: crate::prune::PruneResult::default(),
+    };
+    finish_reducer_after_declared_prune(
+        root,
+        manifest,
+        Some(initial_index),
+        declared_prune,
+        reducer_config,
+    )
+}
+
 fn finish_reducer_after_declared_prune(
     root: &KernelSourceRoot,
     manifest: RemovalManifest,

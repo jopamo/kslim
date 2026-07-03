@@ -20,7 +20,7 @@ pub(crate) use actions::validate_reducer_edit_provenance;
 #[allow(unused_imports)]
 pub use engine::run_fixed_point_loop;
 pub(crate) use engine::{run_selftests_with_fixups, SelftestFixedPointFailure};
-pub(crate) use pipeline::run_reducer_after_declared_prune;
+pub(crate) use pipeline::{run_reducer_after_declared_prune, run_reducer_from_manifest};
 #[allow(unused_imports)]
 pub use pipeline::{
     run, run_reducer, run_reducer_for_profile, run_reducer_with_abi_policy,

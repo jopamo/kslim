@@ -194,14 +194,38 @@ pub(crate) fn sync_candidate_committed_metadata_dir(
         output_metadata.clone(),
     )?;
     let mut summary = SyncSummary::default();
-    sync_dir_contents(
-        &boundary,
-        &candidate_metadata,
-        &output_metadata,
-        false,
-        &SyncPolicy::replace_candidate_metadata(),
-        &mut summary,
-    )?;
+    ensure_dir_counted_inside_root(&boundary.output_root, &output_metadata, &mut summary)?;
+
+    let mut expected = BTreeSet::<OsString>::new();
+    for file_name in metadata::committed_candidate_metadata_file_names() {
+        let name = OsString::from(file_name);
+        let source = candidate_metadata.join(&name);
+        match std::fs::symlink_metadata(&source) {
+            Ok(_) => {
+                expected.insert(name.clone());
+                sync_path(
+                    &boundary,
+                    &source,
+                    &output_metadata.join(&name),
+                    &SyncPolicy::replace_candidate_metadata(),
+                    &mut summary,
+                )?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    for entry in std::fs::read_dir(&output_metadata)? {
+        let entry = entry?;
+        let name = normalize_entry_name("output committed metadata entry", &entry.file_name(), &output_metadata)?;
+        if is_reserved_sync_entry(&name, false, &SyncPolicy::replace_candidate_metadata()) {
+            continue;
+        }
+        if !expected.contains(&name) {
+            remove_path_inside_root(&boundary, &entry.path(), &mut summary)?;
+        }
+    }
     Ok(())
 }
 

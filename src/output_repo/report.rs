@@ -56,16 +56,6 @@ const CANDIDATE_REPORT_FILES: &[&str] = &[
 
 const COMMITTED_REPORT_FILES: &[&str] = &[
     metadata::REPORT_FILE,
-    REDUCER_REMOVAL_MANIFEST,
-    REDUCER_REPORT_MD,
-    REDUCER_REPORT_JSON,
-    REDUCER_DIAGNOSTICS_JSON,
-    REDUCER_EDIT_SUMMARY_JSON,
-    REDUCER_KCONFIG_SOLVER_REPORT_JSON,
-    REDUCER_KCONFIG_REWRITE_REPORT_JSON,
-    REDUCER_SKIPPED_SITES_JSON,
-    MATRIX_REPORT_JSON,
-    GENERATE_REPORT_JSON,
 ];
 
 #[allow(dead_code)]
@@ -362,8 +352,8 @@ mod tests {
         let metadata_dir = candidate.join(".kslim");
         std::fs::create_dir_all(&metadata_dir).unwrap();
         std::fs::write(
-            metadata_dir.join(REDUCER_REPORT_JSON),
-            format!("{{\"candidate\":\"{}\"}}", candidate.display()),
+            metadata_dir.join(metadata::REPORT_FILE),
+            format!("candidate: {}\n", candidate.display()),
         )
         .unwrap();
         let metadata_dir = CandidateMetadataDir::new(&metadata_dir).unwrap();

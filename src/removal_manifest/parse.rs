@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::thread;
 
 use crate::abi::AbiPolicyConfig;
 use crate::config::{ArchPolicyConfig, FeaturePreservationInput, SlimConfig};
@@ -19,6 +20,17 @@ use super::validate::{
     abi_sensitive_path_requires_own_manifest_truth, derive_removed_path_categories,
     normalize_declared_path, validate_declared_abi_removal_policy,
 };
+
+struct DerivedRemovalArtifacts {
+    removed_headers: BTreeSet<crate::model::HeaderPath>,
+    removed_public_headers: BTreeSet<crate::model::HeaderPath>,
+    removed_kconfig_sources: BTreeSet<PathBuf>,
+    removed_kbuild_objects: BTreeSet<crate::model::KbuildObject>,
+    removed_exported_symbols: BTreeSet<crate::exported_symbols::ExportedSymbolRemovalProof>,
+    removed_device_bindings: BTreeSet<crate::hardware::DeviceBindingRemovalProof>,
+    removed_runtime_registrations:
+        BTreeSet<crate::runtime::RuntimeRegistrationRemovalProof>,
+}
 
 impl RemovalManifest {
     #[allow(dead_code)]
@@ -162,14 +174,14 @@ impl RemovalManifest {
                 RemovalReason::SlimRemovePath { path: file.clone() },
             );
         }
-        let removed_headers = derive_removed_headers(
+        let derived = derive_manifest_artifacts(
             root,
             &removed_paths,
             &removed_dirs,
             &removed_files,
             &generated_include_roots,
         )?;
-        for header in &removed_headers {
+        for header in &derived.removed_headers {
             reasons.insert(
                 RemovalKey::Header(header.clone()),
                 RemovalReason::SlimRemovePath {
@@ -177,8 +189,7 @@ impl RemovalManifest {
                 },
             );
         }
-        let removed_public_headers = derive_removed_public_headers(&removed_headers);
-        for header in &removed_public_headers {
+        for header in &derived.removed_public_headers {
             reasons.insert(
                 RemovalKey::PublicHeader(header.clone()),
                 RemovalReason::SlimRemovePath {
@@ -186,9 +197,7 @@ impl RemovalManifest {
                 },
             );
         }
-        let removed_kconfig_sources =
-            derive_removed_kconfig_sources(root, &removed_paths, &removed_dirs, &removed_files)?;
-        for source in &removed_kconfig_sources {
+        for source in &derived.removed_kconfig_sources {
             reasons.insert(
                 RemovalKey::KconfigSource(source.clone()),
                 RemovalReason::SlimRemovePath {
@@ -196,9 +205,7 @@ impl RemovalManifest {
                 },
             );
         }
-        let removed_kbuild_objects =
-            derive_removed_kbuild_objects(root, &removed_paths, &removed_dirs, &removed_files)?;
-        for object in &removed_kbuild_objects {
+        for object in &derived.removed_kbuild_objects {
             reasons.insert(
                 RemovalKey::KbuildObject(object.clone()),
                 RemovalReason::SlimRemovePath {
@@ -206,24 +213,6 @@ impl RemovalManifest {
                 },
             );
         }
-        let removed_exported_symbols = derive_removed_exported_symbol_proofs(
-            root,
-            &removed_paths,
-            &removed_dirs,
-            &removed_files,
-        )?;
-        let removed_device_bindings = derive_removed_device_binding_proofs(
-            root,
-            &removed_paths,
-            &removed_dirs,
-            &removed_files,
-        )?;
-        let removed_runtime_registrations = derive_removed_runtime_registration_proofs(
-            root,
-            &removed_paths,
-            &removed_dirs,
-            &removed_files,
-        )?;
 
         let mut seen_symbols = BTreeSet::new();
         for symbol in &slim.remove_configs {
@@ -274,14 +263,14 @@ impl RemovalManifest {
             removed_paths,
             removed_dirs,
             removed_files,
-            removed_headers,
-            removed_public_headers,
+            removed_headers: derived.removed_headers,
+            removed_public_headers: derived.removed_public_headers,
             removed_config_symbols,
-            removed_kconfig_sources,
-            removed_kbuild_objects,
-            removed_device_bindings,
-            removed_exported_symbols,
-            removed_runtime_registrations,
+            removed_kconfig_sources: derived.removed_kconfig_sources,
+            removed_kbuild_objects: derived.removed_kbuild_objects,
+            removed_device_bindings: derived.removed_device_bindings,
+            removed_exported_symbols: derived.removed_exported_symbols,
+            removed_runtime_registrations: derived.removed_runtime_registrations,
             abi_policy: abi_policy.clone(),
             arch_policy: ArchPolicyConfig::default(),
             unsafe_allow_root_path_removal: slim.unsafe_allow_root_path_removal,
@@ -290,6 +279,130 @@ impl RemovalManifest {
             reasons,
             default_overrides,
         })
+    }
+}
+
+fn derive_manifest_artifacts(
+    root: Option<&Path>,
+    removed_paths: &BTreeSet<PathBuf>,
+    removed_dirs: &BTreeSet<PathBuf>,
+    removed_files: &BTreeSet<PathBuf>,
+    generated_include_roots: &BTreeSet<PathBuf>,
+) -> Result<DerivedRemovalArtifacts> {
+    let worker_threads = thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    if root.is_none() || worker_threads <= 1 {
+        return derive_manifest_artifacts_serial(
+            root,
+            removed_paths,
+            removed_dirs,
+            removed_files,
+            generated_include_roots,
+        );
+    }
+
+    thread::scope(|scope| -> Result<DerivedRemovalArtifacts> {
+        let headers = scope.spawn(|| {
+            let removed_headers = derive_removed_headers(
+                root,
+                removed_paths,
+                removed_dirs,
+                removed_files,
+                generated_include_roots,
+            )?;
+            let removed_public_headers = derive_removed_public_headers(&removed_headers);
+            Ok::<_, anyhow::Error>((removed_headers, removed_public_headers))
+        });
+        let kconfig_sources = scope.spawn(|| {
+            derive_removed_kconfig_sources(root, removed_paths, removed_dirs, removed_files)
+        });
+        let kbuild_objects = scope.spawn(|| {
+            derive_removed_kbuild_objects(root, removed_paths, removed_dirs, removed_files)
+        });
+        let exported_symbols = scope.spawn(|| {
+            derive_removed_exported_symbol_proofs(root, removed_paths, removed_dirs, removed_files)
+        });
+        let device_bindings = scope.spawn(|| {
+            derive_removed_device_binding_proofs(root, removed_paths, removed_dirs, removed_files)
+        });
+        let runtime_registrations = scope.spawn(|| {
+            derive_removed_runtime_registration_proofs(
+                root,
+                removed_paths,
+                removed_dirs,
+                removed_files,
+            )
+        });
+
+        let (removed_headers, removed_public_headers) = join_scoped_result(headers)?;
+        Ok(DerivedRemovalArtifacts {
+            removed_headers,
+            removed_public_headers,
+            removed_kconfig_sources: join_scoped_result(kconfig_sources)?,
+            removed_kbuild_objects: join_scoped_result(kbuild_objects)?,
+            removed_exported_symbols: join_scoped_result(exported_symbols)?,
+            removed_device_bindings: join_scoped_result(device_bindings)?,
+            removed_runtime_registrations: join_scoped_result(runtime_registrations)?,
+        })
+    })
+}
+
+fn derive_manifest_artifacts_serial(
+    root: Option<&Path>,
+    removed_paths: &BTreeSet<PathBuf>,
+    removed_dirs: &BTreeSet<PathBuf>,
+    removed_files: &BTreeSet<PathBuf>,
+    generated_include_roots: &BTreeSet<PathBuf>,
+) -> Result<DerivedRemovalArtifacts> {
+    let removed_headers = derive_removed_headers(
+        root,
+        removed_paths,
+        removed_dirs,
+        removed_files,
+        generated_include_roots,
+    )?;
+    let removed_public_headers = derive_removed_public_headers(&removed_headers);
+    Ok(DerivedRemovalArtifacts {
+        removed_headers,
+        removed_public_headers,
+        removed_kconfig_sources: derive_removed_kconfig_sources(
+            root,
+            removed_paths,
+            removed_dirs,
+            removed_files,
+        )?,
+        removed_kbuild_objects: derive_removed_kbuild_objects(
+            root,
+            removed_paths,
+            removed_dirs,
+            removed_files,
+        )?,
+        removed_exported_symbols: derive_removed_exported_symbol_proofs(
+            root,
+            removed_paths,
+            removed_dirs,
+            removed_files,
+        )?,
+        removed_device_bindings: derive_removed_device_binding_proofs(
+            root,
+            removed_paths,
+            removed_dirs,
+            removed_files,
+        )?,
+        removed_runtime_registrations: derive_removed_runtime_registration_proofs(
+            root,
+            removed_paths,
+            removed_dirs,
+            removed_files,
+        )?,
+    })
+}
+
+fn join_scoped_result<T>(handle: thread::ScopedJoinHandle<'_, Result<T>>) -> Result<T> {
+    match handle.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
     }
 }
 
