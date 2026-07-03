@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/kslim.png" alt="kslim logo" width="220">
+  <img src="kslim.png" alt="kslim logo" width="220">
 </p>
 
 # kslim
@@ -23,9 +23,3 @@ kslim validate-config
 kslim plan
 kslim generate
 ```
-
-## Docs
-
-- [Architecture](docs/architecture.md)
-- [Kernel build iteration](docs/kernel-build-iteration.md)
-- [Reference docs](docs/reference/README.md)
