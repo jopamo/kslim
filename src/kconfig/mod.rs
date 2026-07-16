@@ -699,7 +699,7 @@ pub(crate) fn resolve_kconfig_source(
 }
 
 pub(crate) fn kconfig_files(root: &Path) -> Vec<PathBuf> {
-    walk_named(root, &["Kconfig", "Kconfig.debug"])
+    walk_named(root, |name| name == "Kconfig" || name.starts_with("Kconfig."))
 }
 
 pub(crate) fn defined_symbols_in_file(path: &Path) -> Result<Vec<String>> {
@@ -821,7 +821,7 @@ fn relative_to_root_path(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
 
-fn walk_named(root: &Path, names: &[&str]) -> Vec<PathBuf> {
+fn walk_named(root: &Path, matches: impl Fn(&str) -> bool) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for entry in walkdir::WalkDir::new(root)
         .into_iter()
@@ -838,7 +838,7 @@ fn walk_named(root: &Path, names: &[&str]) -> Vec<PathBuf> {
         if entry
             .file_name()
             .to_str()
-            .is_some_and(|name| names.iter().any(|candidate| candidate == &name))
+            .is_some_and(&matches)
         {
             out.push(entry.into_path());
         }

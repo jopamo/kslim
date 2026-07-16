@@ -1590,6 +1590,39 @@ source "drivers/gpu/drm/amd/display/Kconfig"
     }
 
     #[test]
+    fn test_prune_keeps_symbol_with_surviving_kconfig_suffix_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("arch/arm")).unwrap();
+        std::fs::write(
+            root.join("arch/arm/Kconfig"),
+            "config SCHED_HRTICK\n\tdef_bool HIGH_RES_TIMERS\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("kernel")).unwrap();
+        std::fs::write(
+            root.join("kernel/Kconfig.hz"),
+            "config SCHED_HRTICK\n\tdef_bool HIGH_RES_TIMERS\n",
+        )
+        .unwrap();
+
+        let slim = SlimConfig {
+            remove_paths: vec!["arch/arm/Kconfig".to_string()],
+            remove_configs: vec![],
+            set_defaults: BTreeMap::new(),
+            unsafe_allow_root_path_removal: false,
+        };
+
+        let stats = prune_tree(root.to_str().unwrap(), &slim).unwrap();
+
+        assert!(!stats
+            .removal
+            .removed_config_symbols
+            .contains(&String::from("SCHED_HRTICK")));
+    }
+
+    #[test]
     fn test_prune_rewrites_stale_ccflags_include_paths_after_dir_removal() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

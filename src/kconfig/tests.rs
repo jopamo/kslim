@@ -28,6 +28,11 @@ fn kconfig_files_skips_generator_template_directories() {
     let root = tmp.path();
 
     std::fs::write(root.join("Kconfig"), "config ROOT\n\tbool \"Root\"\n").unwrap();
+    std::fs::write(
+        root.join("Kconfig.hz"),
+        "config SCHED_HRTICK\n\tdef_bool HIGH_RES_TIMERS\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(root.join("tools/verification/rvgen/rvgen/templates")).unwrap();
     std::fs::write(
         root.join("tools/verification/rvgen/rvgen/templates/Kconfig"),
@@ -40,7 +45,10 @@ fn kconfig_files_skips_generator_template_directories() {
         .map(|path| path.strip_prefix(root).unwrap().to_path_buf())
         .collect::<Vec<_>>();
 
-    assert_eq!(files, vec![PathBuf::from("Kconfig")]);
+    assert_eq!(
+        files,
+        vec![PathBuf::from("Kconfig"), PathBuf::from("Kconfig.hz")]
+    );
 }
 
 #[path = "tests_rewrite.rs"]
