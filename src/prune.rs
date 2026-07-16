@@ -1623,6 +1623,99 @@ source "drivers/gpu/drm/amd/display/Kconfig"
     }
 
     #[test]
+    fn test_prune_removes_dead_kconfig_assignments_for_removed_helpers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::create_dir_all(root.join("init")).unwrap();
+        std::fs::write(root.join("scripts/rustc-version.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(root.join("scripts/rustc-llvm-version.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            root.join("scripts/Kconfig.include"),
+            concat!(
+                "cc-version := $(shell,$(srctree)/scripts/cc-version.sh $(CC))\n",
+                "rustc-version := $(shell,$(srctree)/scripts/rustc-version.sh $(RUSTC))\n",
+                "rustc-llvm-version := $(shell,$(srctree)/scripts/rustc-llvm-version.sh $(RUSTC))\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("init/Kconfig"),
+            concat!(
+                "config RUSTC_VERSION\n",
+                "\tint\n",
+                "\tdefault $(rustc-version)\n",
+                "config RUSTC_LLVM_VERSION\n",
+                "\tint\n",
+                "\tdefault $(rustc-llvm-version)\n",
+            ),
+        )
+        .unwrap();
+
+        let slim = SlimConfig {
+            remove_paths: vec![
+                "scripts/rustc-version.sh".to_string(),
+                "scripts/rustc-llvm-version.sh".to_string(),
+            ],
+            remove_configs: vec![
+                "RUSTC_VERSION".to_string(),
+                "RUSTC_LLVM_VERSION".to_string(),
+            ],
+            set_defaults: BTreeMap::new(),
+            unsafe_allow_root_path_removal: false,
+        };
+
+        let stats = prune_tree(root.to_str().unwrap(), &slim).unwrap();
+        let include = std::fs::read_to_string(root.join("scripts/Kconfig.include")).unwrap();
+
+        assert!(include.contains("scripts/cc-version.sh"));
+        assert!(!include.contains("scripts/rustc-version.sh"));
+        assert!(!include.contains("scripts/rustc-llvm-version.sh"));
+        assert_eq!(
+            stats
+                .edits
+                .iter()
+                .filter(|edit| edit.pass_name == "prune.rewrite_removed_kconfig_helpers")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_prune_rejects_removed_kconfig_helper_with_live_consumer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/rustc-version.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            root.join("scripts/Kconfig.include"),
+            "rustc-version := $(shell,$(srctree)/scripts/rustc-version.sh $(RUSTC))\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("Kconfig"),
+            "config LIVE\n\tint\n\tdefault $(rustc-version)\n",
+        )
+        .unwrap();
+
+        let slim = SlimConfig {
+            remove_paths: vec!["scripts/rustc-version.sh".to_string()],
+            remove_configs: vec![],
+            set_defaults: BTreeMap::new(),
+            unsafe_allow_root_path_removal: false,
+        };
+
+        let err = prune_tree(root.to_str().unwrap(), &slim)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(
+            "removed Kconfig helper 'scripts/rustc-version.sh' is still required by live variable 'rustc-version'"
+        ));
+    }
+
+    #[test]
     fn test_prune_rewrites_stale_ccflags_include_paths_after_dir_removal() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();

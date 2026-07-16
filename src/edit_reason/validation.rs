@@ -247,6 +247,9 @@ fn reason_allowed_for_pass(pass_name: &str, reason: &EditReason) -> bool {
             matches!(reason, EditReason::RemovedEmptyKconfigMenu { .. })
         },
         "prune.rewrite_kconfig_sources" => matches!(reason, EditReason::RemovedKconfigSource),
+        "prune.rewrite_removed_kconfig_helpers" => {
+            matches!(reason, EditReason::ManifestPath { .. })
+        }
         "prune.rewrite_makefiles" => matches!(
             reason,
             EditReason::RemovedKbuildDirectoryRef

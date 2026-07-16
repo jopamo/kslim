@@ -19,6 +19,7 @@ const EDIT_PASS_ORDER: &[&str] = &[
     "kconfig.rewrite_dead_symbol_definitions",
     "kconfig.rewrite_empty_menus",
     "prune.rewrite_kconfig_sources",
+    "prune.rewrite_removed_kconfig_helpers",
     "prune.rewrite_makefiles",
     "cpp.fold_removed_config_branches",
     "includes.rewrite_removed_headers",

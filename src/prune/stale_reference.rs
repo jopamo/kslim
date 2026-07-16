@@ -4,10 +4,13 @@
 //! config symbols are removed: kbuild object references and Kconfig source
 //! references proven by the removal manifest plus tree index.
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
-use crate::edit_reason::EditRecord;
+use crate::edit_reason::{
+    ensure_edit_records_for_mutation, sort_edit_records, write_verified_rewrite, EditProofSource,
+    EditReason, EditRecord, LineRange,
+};
 use crate::kbuild::KbuildSkippedLine;
 use crate::removal_manifest::RemovalManifest;
 
@@ -42,8 +45,148 @@ pub(in crate::prune) fn rewrite_build_graph(
     stats.makefile_refs_removed = makefile_report.removed_refs;
     stats.skipped_makefile_lines = makefile_report.skipped_ambiguous_lines;
     stats.edits.extend(makefile_report.edits);
+    stats
+        .edits
+        .extend(rewrite_removed_kconfig_helper_assignments(
+            root,
+            &removed_files,
+        )?);
 
     Ok(stats)
+}
+
+const KCONFIG_HELPER_REWRITE_PASS: &str = "prune.rewrite_removed_kconfig_helpers";
+
+#[derive(Debug)]
+struct RemovedKconfigHelperAssignment {
+    file: PathBuf,
+    line: usize,
+    variable: String,
+    removed_helper: PathBuf,
+    before: String,
+}
+
+fn rewrite_removed_kconfig_helper_assignments(
+    root: &Path,
+    removed_files: &[PathBuf],
+) -> Result<Vec<EditRecord>> {
+    if removed_files.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let files = crate::kconfig::kconfig_files(root);
+    let contents = files
+        .iter()
+        .map(|path| Ok((path.clone(), std::fs::read_to_string(path)?)))
+        .collect::<Result<Vec<_>>>()?;
+    let mut assignments = Vec::new();
+
+    for (path, content) in &contents {
+        for (index, raw) in content.split_inclusive('\n').enumerate() {
+            let line = raw.strip_suffix('\n').unwrap_or(raw);
+            let Some((lhs, rhs)) = line.split_once(":=") else {
+                continue;
+            };
+            let variable = lhs.trim();
+            if variable.is_empty()
+                || !variable
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                || !rhs.contains("$(shell,")
+            {
+                continue;
+            }
+
+            let Some(removed_helper) = removed_files.iter().find(|removed| {
+                let marker = format!("$(srctree)/{}", removed.display());
+                rhs.contains(&marker)
+            }) else {
+                continue;
+            };
+
+            assignments.push(RemovedKconfigHelperAssignment {
+                file: path.clone(),
+                line: index + 1,
+                variable: variable.to_string(),
+                removed_helper: removed_helper.clone(),
+                before: raw.to_string(),
+            });
+        }
+    }
+
+    for assignment in &assignments {
+        let reference = format!("$({})", assignment.variable);
+        let still_used = contents.iter().any(|(path, content)| {
+            content
+                .split_inclusive('\n')
+                .enumerate()
+                .any(|(index, line)| {
+                    !(path == &assignment.file && index + 1 == assignment.line)
+                        && line.contains(&reference)
+                })
+        });
+        if still_used {
+            bail!(
+                "removed Kconfig helper '{}' is still required by live variable '{}'",
+                assignment.removed_helper.display(),
+                assignment.variable
+            );
+        }
+    }
+
+    let mut edits = assignments
+        .iter()
+        .map(|assignment| {
+            let relative = assignment
+                .file
+                .strip_prefix(root)
+                .unwrap_or(&assignment.file)
+                .to_path_buf();
+            EditRecord::new(
+                relative,
+                Some(LineRange {
+                    start: assignment.line,
+                    end: assignment.line,
+                }),
+                assignment.before.clone(),
+                String::new(),
+                EditReason::ManifestPath {
+                    path: assignment.removed_helper.clone(),
+                },
+                EditProofSource::removal_manifest_path(assignment.removed_helper.clone()),
+                KCONFIG_HELPER_REWRITE_PASS,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (path, content) in &contents {
+        let file_assignments = assignments
+            .iter()
+            .filter(|assignment| assignment.file == *path)
+            .collect::<Vec<_>>();
+        if file_assignments.is_empty() {
+            continue;
+        }
+        let rewritten = content
+            .split_inclusive('\n')
+            .enumerate()
+            .filter_map(|(index, line)| {
+                (!file_assignments
+                    .iter()
+                    .any(|assignment| assignment.line == index + 1))
+                .then_some(line)
+            })
+            .collect::<String>();
+        write_verified_rewrite(root, path, &rewritten, &edits, KCONFIG_HELPER_REWRITE_PASS)?;
+    }
+
+    ensure_edit_records_for_mutation(
+        KCONFIG_HELPER_REWRITE_PASS,
+        assignments.len(),
+        &edits,
+    )?;
+    sort_edit_records(&mut edits);
+    Ok(edits)
 }
 
 pub(in crate::prune) fn rewrite_kconfig_sources(
